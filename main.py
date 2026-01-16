@@ -9,7 +9,7 @@ except:
     pass
 
 from PyQt5 import QtWidgets
-from mc_marking.gui.omr_software import OMRSoftware
+from omr_software import OMRSoftware
 
 def run_app():
     app = QtWidgets.QApplication(sys.argv)

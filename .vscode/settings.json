@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^D:/python/MC_marking/\\.venv/Scripts/python\\.exe mc_marking/gui/omr_software\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

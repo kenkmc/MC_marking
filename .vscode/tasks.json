@@ -1,0 +1,23 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run MC Marking",
+			"type": "shell",
+			"command": "C:/Users/JCMKEC/Desktop/python/MC_marking/.venv/Scripts/python.exe",
+			"args": [
+				"main.py"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Run OMR Software",
+			"type": "shell",
+			"command": "C:/Users/JCMKEC/Desktop/python/MC_marking/.venv/Scripts/python.exe",
+			"args": [
+				"mc_marking/gui/omr_software.py"
+			],
+			"group": "build"
+		}
+	]
+}
