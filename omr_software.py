@@ -37,6 +37,8 @@ import sys
 import json
 import os
 import io
+import cv2
+import numpy as np
 from PIL import Image
 from openpyxl import Workbook
 from openpyxl.styles import Font as XLFont, Alignment, Border, Side
@@ -44,6 +46,71 @@ from openpyxl.styles import Font as XLFont, Alignment, Border, Side
 # Mark types
 MARK_TYPE_TEXT = "text"      # Text field (e.g., student name, ID)
 MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
+
+
+def deskew_image(img_array):
+    """
+    Detect and correct skew in scanned page.
+    Returns corrected image and the skew angle.
+    """
+    # Convert to grayscale if needed
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_array.copy()
+    
+    # Apply edge detection
+    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+    
+    # Detect lines using Hough transform
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, 
+                            minLineLength=100, maxLineGap=10)
+    
+    if lines is None or len(lines) == 0:
+        return img_array, 0.0
+    
+    # Calculate angles of detected lines
+    angles = []
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        if x2 - x1 != 0:
+            angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+            # Only consider near-horizontal lines (within 15 degrees)
+            if abs(angle) < 15:
+                angles.append(angle)
+    
+    if not angles:
+        return img_array, 0.0
+    
+    # Get median angle (more robust than mean)
+    skew_angle = np.median(angles)
+    
+    # Don't correct very small angles
+    if abs(skew_angle) < 0.3:
+        return img_array, 0.0
+    
+    # Rotate image to correct skew
+    h, w = img_array.shape[:2]
+    center = (w // 2, h // 2)
+    rotation_matrix = cv2.getRotationMatrix2D(center, skew_angle, 1.0)
+    
+    # Calculate new bounding box size
+    cos = np.abs(rotation_matrix[0, 0])
+    sin = np.abs(rotation_matrix[0, 1])
+    new_w = int((h * sin) + (w * cos))
+    new_h = int((h * cos) + (w * sin))
+    
+    # Adjust rotation matrix for new size
+    rotation_matrix[0, 2] += (new_w / 2) - center[0]
+    rotation_matrix[1, 2] += (new_h / 2) - center[1]
+    
+    # Apply rotation with white background
+    corrected = cv2.warpAffine(img_array, rotation_matrix, (new_w, new_h), 
+                               borderMode=cv2.BORDER_CONSTANT, 
+                               borderValue=(255, 255, 255) if len(img_array.shape) == 3 else 255)
+    
+    return corrected, skew_angle
+
 
 # Modern Style Sheet
 STYLE_SHEET = """
@@ -293,12 +360,25 @@ class MarkingView(QGraphicsView):
             super().wheelEvent(event)
             
     def zoom_in(self):
-        self.zoom_factor *= 1.2
-        self.setTransform(QtGui.QTransform().scale(self.zoom_factor, self.zoom_factor))
+        if self.zoom_factor < 10.0:  # Max zoom limit
+            self.zoom_factor *= 1.2
+            self.setTransform(QtGui.QTransform().scale(self.zoom_factor, self.zoom_factor))
             
     def zoom_out(self):
-        self.zoom_factor /= 1.2
-        self.setTransform(QtGui.QTransform().scale(self.zoom_factor, self.zoom_factor))
+        if self.zoom_factor > 0.1:  # Min zoom limit
+            self.zoom_factor /= 1.2
+            self.setTransform(QtGui.QTransform().scale(self.zoom_factor, self.zoom_factor))
+    
+    def zoom_reset(self):
+        self.zoom_factor = 1.0
+        self.setTransform(QtGui.QTransform().scale(1.0, 1.0))
+    
+    def zoom_fit(self):
+        """Fit the entire scene in the view"""
+        self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
+        # Update zoom_factor based on current transform
+        transform = self.transform()
+        self.zoom_factor = transform.m11()  # Get horizontal scale factor
         
     def mousePressEvent(self, event):
         if self.marking_mode and event.button() == Qt.LeftButton:
@@ -398,6 +478,8 @@ class OMRSoftware(QMainWindow):
         self.current_pixmap_item = None
         self.answer_key = {}
         self.first_page_key = False
+        self.align_reference_gray = None
+        self.align_reference_size = None
         
         self.init_ui()
         
@@ -408,6 +490,200 @@ class OMRSoftware(QMainWindow):
             print("Using Tesseract")
         else:
             print("No OCR engine found")
+
+    def _prepare_alignment_gray(self, img_np, target_size=None):
+        if len(img_np.shape) == 3:
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_np.copy()
+
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        if target_size is not None:
+            target_w, target_h = target_size
+            scale_x = target_w / gray.shape[1]
+            scale_y = target_h / gray.shape[0]
+            gray = cv2.resize(gray, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            return gray, scale_x, scale_y
+
+        # Normalize size to max dimension 800
+        max_dim = max(gray.shape[0], gray.shape[1])
+        if max_dim > 800:
+            scale = 800.0 / max_dim
+            gray = cv2.resize(gray, (int(gray.shape[1] * scale), int(gray.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+            return gray, scale, scale
+
+        return gray, 1.0, 1.0
+
+    def align_image(self, img_np):
+        """
+        Align current page to reference by detecting table/frame boundaries.
+        Uses edge detection to find the main table frame and align based on its position.
+        Returns aligned image, (dx, dy), and confidence score.
+        """
+        if not hasattr(self, 'check_auto_align') or not self.check_auto_align.isChecked():
+            return img_np, (0.0, 0.0), 0.0
+
+        # Find the main table boundaries in current image
+        cur_bounds = self._find_table_bounds(img_np)
+        
+        if cur_bounds is None:
+            print("  Auto-align: Cannot detect table boundaries")
+            return img_np, (0.0, 0.0), 0.0
+        
+        # First page becomes the reference
+        if self.align_reference_gray is None:
+            self.align_reference_bounds = cur_bounds
+            self.align_reference_gray = True  # Just mark as initialized
+            print(f"  Auto-align: Reference bounds set: {cur_bounds}")
+            return img_np, (0.0, 0.0), 1.0
+
+        ref_bounds = self.align_reference_bounds
+        
+        # Calculate shift needed to align current to reference
+        # Align based on top-left corner of detected table
+        dx = ref_bounds[0] - cur_bounds[0]  # x shift
+        dy = ref_bounds[1] - cur_bounds[1]  # y shift
+        
+        # Also check if size differs significantly (might indicate wrong detection)
+        ref_w = ref_bounds[2] - ref_bounds[0]
+        ref_h = ref_bounds[3] - ref_bounds[1]
+        cur_w = cur_bounds[2] - cur_bounds[0]
+        cur_h = cur_bounds[3] - cur_bounds[1]
+        
+        size_diff = abs(ref_w - cur_w) / ref_w + abs(ref_h - cur_h) / ref_h
+        if size_diff > 0.3:  # More than 30% size difference
+            print(f"  Auto-align: Size difference too large ({size_diff:.2%}), skipping")
+            return img_np, (0.0, 0.0), 0.5
+        
+        # Sanity check for extreme shifts
+        h, w = img_np.shape[:2]
+        if abs(dx) > w * 0.2 or abs(dy) > h * 0.2:
+            print(f"  Auto-align: Shift too large (dx={dx:.1f}, dy={dy:.1f}), skipping")
+            return img_np, (0.0, 0.0), 0.3
+        
+        # Skip if shift is negligible
+        if abs(dx) < 3 and abs(dy) < 3:
+            return img_np, (0.0, 0.0), 1.0
+        
+        print(f"  Auto-align: Shifting by dx={dx:.1f}, dy={dy:.1f}")
+        
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        if len(img_np.shape) == 3:
+            border_value = (255, 255, 255)
+        else:
+            border_value = 255
+
+        aligned = cv2.warpAffine(img_np, M, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=border_value)
+        return aligned, (dx, dy), 1.0 - size_diff
+    
+    def _find_table_bounds(self, img_np):
+        """
+        Find the bounding box of the main table/frame in the image.
+        Returns (x1, y1, x2, y2) or None if not found.
+        """
+        # Convert to grayscale
+        if len(img_np.shape) == 3:
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_np.copy()
+        
+        h, w = gray.shape
+        
+        # Apply edge detection
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # Apply morphological operations to connect edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        edges = cv2.dilate(edges, kernel, iterations=2)
+        edges = cv2.erode(edges, kernel, iterations=1)
+        
+        # Find contours
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None
+        
+        # Find the largest contour that looks like a table (rectangular, large area)
+        best_contour = None
+        best_area = 0
+        min_area = h * w * 0.1  # At least 10% of image
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < min_area:
+                continue
+            
+            # Check if roughly rectangular
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+            
+            # Accept 4-sided polygons or large areas
+            if len(approx) >= 4 or area > best_area:
+                if area > best_area:
+                    best_area = area
+                    best_contour = contour
+        
+        if best_contour is None:
+            # Fallback: use projection profile to find table edges
+            return self._find_bounds_by_projection(gray)
+        
+        x, y, bw, bh = cv2.boundingRect(best_contour)
+        return (x, y, x + bw, y + bh)
+    
+    def _find_bounds_by_projection(self, gray):
+        """
+        Find table bounds using horizontal and vertical projection profiles.
+        This works well for scanned documents with clear table borders.
+        """
+        h, w = gray.shape
+        
+        # Threshold to binary (invert so lines are white)
+        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+        
+        # Horizontal projection (sum along rows)
+        h_proj = np.sum(binary, axis=1)
+        
+        # Vertical projection (sum along columns)  
+        v_proj = np.sum(binary, axis=0)
+        
+        # Find edges using projection threshold
+        h_thresh = np.max(h_proj) * 0.1
+        v_thresh = np.max(v_proj) * 0.1
+        
+        # Find top edge
+        y1 = 0
+        for i in range(h):
+            if h_proj[i] > h_thresh:
+                y1 = i
+                break
+        
+        # Find bottom edge
+        y2 = h - 1
+        for i in range(h - 1, -1, -1):
+            if h_proj[i] > h_thresh:
+                y2 = i
+                break
+        
+        # Find left edge
+        x1 = 0
+        for i in range(w):
+            if v_proj[i] > v_thresh:
+                x1 = i
+                break
+        
+        # Find right edge
+        x2 = w - 1
+        for i in range(w - 1, -1, -1):
+            if v_proj[i] > v_thresh:
+                x2 = i
+                break
+        
+        # Validate bounds
+        if x2 - x1 < w * 0.3 or y2 - y1 < h * 0.3:
+            return None
+        
+        return (x1, y1, x2, y2)
 
     def detect_filled_option(self, image, options_count=4, save_debug=False):
         """
@@ -471,8 +747,16 @@ class OMRSoftware(QMainWindow):
         overall_gray_mean = np.mean(gray)
         overall_sat_mean = np.mean(saturation) if has_color else 0
         
+        # Apply contrast enhancement for light mark detection
+        # This helps detect very faint pencil marks
+        gray_enhanced = gray.copy()
+        gray_min, gray_max = np.min(gray), np.max(gray)
+        if gray_max > gray_min:
+            # Stretch contrast to full range
+            gray_enhanced = ((gray - gray_min) / (gray_max - gray_min) * 255).astype(np.float64)
+        
         print(f"  Image size: {width}x{height}, {options_count} options, cell width: {cell_width}px")
-        print(f"  Overall: gray_mean={overall_gray_mean:.1f}, saturation_mean={overall_sat_mean:.1f}")
+        print(f"  Overall: gray_mean={overall_gray_mean:.1f}, saturation_mean={overall_sat_mean:.1f}, contrast_range={gray_max-gray_min:.1f}")
         
         # Analyze each cell
         cell_scores = []
@@ -482,11 +766,20 @@ class OMRSoftware(QMainWindow):
             right = (i + 1) * cell_width if i < options_count - 1 else width
             
             cell_gray = gray[:, left:right]
+            cell_gray_enhanced = gray_enhanced[:, left:right]
             cell_gray_mean = np.mean(cell_gray)
             cell_gray_std = np.std(cell_gray)
             
             # Darkness score (lower mean = darker)
             darkness_score = overall_gray_mean - cell_gray_mean
+            
+            # Enhanced darkness score using contrast-stretched image
+            enhanced_mean = np.mean(cell_gray_enhanced)
+            enhanced_overall = np.mean(gray_enhanced)
+            enhanced_darkness = enhanced_overall - enhanced_mean
+            
+            # Local contrast: high std means there's a mark
+            local_contrast_score = cell_gray_std / 10.0  # Normalize
             
             # Color-based scores
             if has_color:
@@ -505,10 +798,13 @@ class OMRSoftware(QMainWindow):
             
             # Combined score: weighted sum of different indicators
             # Higher score = more likely to be filled
+            # Enhanced scoring for light marks
             combined_score = (
-                darkness_score * 1.0 +      # Weight for darkness
-                sat_score * 0.5 +           # Weight for saturation (colored marks)
-                max(0, cell_blue_mean) * 0.3  # Weight for blue specifically
+                darkness_score * 1.0 +          # Weight for darkness
+                enhanced_darkness * 0.5 +       # Weight for enhanced contrast darkness
+                local_contrast_score * 0.3 +    # Weight for local contrast (marks have texture)
+                sat_score * 0.5 +               # Weight for saturation (colored marks)
+                max(0, cell_blue_mean) * 0.3    # Weight for blue specifically
             )
             
             cell_scores.append({
@@ -516,13 +812,15 @@ class OMRSoftware(QMainWindow):
                 'gray_mean': cell_gray_mean,
                 'gray_std': cell_gray_std,
                 'darkness': darkness_score,
+                'enhanced_dark': enhanced_darkness,
+                'local_contrast': local_contrast_score,
                 'saturation': cell_sat_mean,
                 'sat_score': sat_score,
                 'blue_score': cell_blue_mean,
                 'combined': combined_score
             })
             
-            print(f"    Option {option_labels[i]}: gray={cell_gray_mean:.1f}, dark={darkness_score:.1f}, sat={cell_sat_mean:.1f}, blue={cell_blue_mean:.1f}, combined={combined_score:.1f}")
+            print(f"    Option {option_labels[i]}: gray={cell_gray_mean:.1f}, dark={darkness_score:.1f}, enh_dark={enhanced_darkness:.1f}, contrast={local_contrast_score:.1f}, combined={combined_score:.1f}")
         
         # Save debug image with cell divisions and scores
         if save_debug:
@@ -562,23 +860,52 @@ class OMRSoftware(QMainWindow):
             
             print(f"  Score range: {min_combined:.1f} to {max_combined:.1f} (range={score_range:.1f})")
             
-            if score_range > 3:  # There's meaningful variation
-                # Pick options that are significantly higher than the minimum
-                # and close to the maximum
-                threshold_combined = min_combined + score_range * 0.5  # Must be above 50% of range
+            # Adaptive thresholding for light marks
+            # Much lower thresholds to detect very faint pencil marks
+            
+            # Method 1: If there's clear variation, use the highest scoring option
+            if score_range > 1.5:  # Even small variation matters (lowered from 2)
+                # Find the option with highest combined score
+                max_score_option = max(cell_scores, key=lambda s: s['combined'])
+                
+                # Pick options that are close to the maximum (within 30% of range from top)
+                threshold_combined = max_combined - score_range * 0.35
+                
+                # Very low minimum absolute threshold for light marks
+                min_absolute = 1.0  # Very low to catch faint marks
                 
                 for score in cell_scores:
-                    if score['combined'] >= threshold_combined and score['combined'] > 3:
+                    if score['combined'] >= threshold_combined and score['combined'] >= min_absolute:
                         filled_options.append(score['option'])
+                
+                # If still no detection but there's a clear winner, pick it
+                if not filled_options and max_combined > 0.5:
+                    filled_options.append(max_score_option['option'])
                         
-                print(f"  Threshold (relative): {threshold_combined:.1f}")
+                print(f"  Threshold (relative): {threshold_combined:.1f}, min_absolute: {min_absolute}")
             else:
-                # No clear winner - check if any has a notable combined score
-                threshold_combined = 5  # Absolute minimum
+                # No clear variation - use standard deviation analysis
+                # Check if any option has significantly lower gray mean (darker)
+                gray_means = [s['gray_mean'] for s in cell_scores]
+                gray_std_overall = np.std(gray_means) if len(gray_means) > 1 else 0
                 
-                for score in cell_scores:
-                    if score['combined'] > threshold_combined:
-                        filled_options.append(score['option'])
+                if gray_std_overall > 1:  # There's some variation in gray levels
+                    min_gray = min(gray_means)
+                    for score in cell_scores:
+                        # Pick options that are darker than average
+                        if score['gray_mean'] <= min_gray + gray_std_overall * 0.5:
+                            if score['darkness'] > 0:  # Must be at least slightly darker
+                                filled_options.append(score['option'])
+                    print(f"  Using gray std analysis: std={gray_std_overall:.1f}")
+                else:
+                    # Fallback: very low absolute threshold
+                    threshold_combined = 1.5  # Very low for light marks
+                    
+                    for score in cell_scores:
+                        if score['combined'] > threshold_combined:
+                            filled_options.append(score['option'])
+                            
+                    print(f"  Threshold (absolute): {threshold_combined}")
                         
                 print(f"  Threshold (absolute): {threshold_combined}")
         
@@ -678,6 +1005,15 @@ class OMRSoftware(QMainWindow):
         self.check_first_key = QCheckBox("First page is Answer Key")
         self.check_first_key.stateChanged.connect(lambda s: setattr(self, 'first_page_key', s == Qt.Checked))
         f_layout.addWidget(self.check_first_key)
+        
+        self.check_auto_deskew = QCheckBox("Auto-correct page skew")
+        self.check_auto_deskew.setChecked(True)  # Enable by default
+        f_layout.addWidget(self.check_auto_deskew)
+
+        self.check_auto_align = QCheckBox("Auto-align pages (shift)")
+        self.check_auto_align.setChecked(True)  # Enable by default
+        f_layout.addWidget(self.check_auto_align)
+        
         left_layout.addWidget(file_grp)
         
         # Marking Tools
@@ -731,6 +1067,10 @@ class OMRSoftware(QMainWindow):
         btn_export.clicked.connect(self.export_excel)
         p_layout.addWidget(btn_export)
         
+        btn_export_img = QPushButton("Export Images with Answers")
+        btn_export_img.clicked.connect(self.export_images)
+        p_layout.addWidget(btn_export_img)
+        
         left_layout.addWidget(proc_grp)
         
         left_layout.addStretch()
@@ -740,17 +1080,44 @@ class OMRSoftware(QMainWindow):
         # --- Center (Preview) ---
         center_layout = QVBoxLayout()
         
-        # Toolbar
+        # Toolbar with navigation and zoom
         nav_layout = QHBoxLayout()
-        btn_prev = QPushButton("Previous")
+        btn_prev = QPushButton("◀ Prev")
         btn_prev.clicked.connect(self.prev_page)
-        btn_next = QPushButton("Next")
+        btn_next = QPushButton("Next ▶")
         btn_next.clicked.connect(self.next_page)
         self.lbl_page = QLabel("Page: 0/0")
+        
+        # Zoom controls
+        btn_zoom_in = QPushButton("🔍+")
+        btn_zoom_in.setFixedWidth(40)
+        btn_zoom_in.setToolTip("Zoom In (Ctrl+Scroll Up)")
+        btn_zoom_in.clicked.connect(lambda: self.view.zoom_in())
+        
+        btn_zoom_out = QPushButton("🔍-")
+        btn_zoom_out.setFixedWidth(40)
+        btn_zoom_out.setToolTip("Zoom Out (Ctrl+Scroll Down)")
+        btn_zoom_out.clicked.connect(lambda: self.view.zoom_out())
+        
+        btn_zoom_reset = QPushButton("100%")
+        btn_zoom_reset.setFixedWidth(50)
+        btn_zoom_reset.setToolTip("Reset Zoom")
+        btn_zoom_reset.clicked.connect(lambda: self.view.zoom_reset())
+        
+        btn_zoom_fit = QPushButton("Fit")
+        btn_zoom_fit.setFixedWidth(40)
+        btn_zoom_fit.setToolTip("Fit to Window")
+        btn_zoom_fit.clicked.connect(lambda: self.view.zoom_fit())
         
         nav_layout.addWidget(btn_prev)
         nav_layout.addWidget(self.lbl_page)
         nav_layout.addWidget(btn_next)
+        nav_layout.addStretch()
+        nav_layout.addWidget(QLabel("Zoom:"))
+        nav_layout.addWidget(btn_zoom_out)
+        nav_layout.addWidget(btn_zoom_reset)
+        nav_layout.addWidget(btn_zoom_in)
+        nav_layout.addWidget(btn_zoom_fit)
         
         center_layout.addLayout(nav_layout)
         
@@ -793,11 +1160,23 @@ class OMRSoftware(QMainWindow):
         fname, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         if fname:
             try:
+                self.pdf_path = fname
                 self.pdf_document = fitz.open(fname)
                 self.current_page = 0
+                self.align_reference_gray = None
+                self.align_reference_size = None
                 self.load_page(0)
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+
+    def _get_pdf_prefix(self):
+        if hasattr(self, 'pdf_path') and self.pdf_path:
+            base = os.path.splitext(os.path.basename(self.pdf_path))[0]
+            return base
+        return "export"
+
+    def _get_timestamp(self):
+        return QtCore.QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
 
     def load_page(self, p_idx):
         if not self.pdf_document: return
@@ -832,6 +1211,9 @@ class OMRSoftware(QMainWindow):
         # Move pixmap to back so marks are visible on top
         self.current_pixmap_item.setZValue(-1)
         self.view.setSceneRect(QRectF(0, 0, pix.width, pix.height))
+        
+        # Reset zoom when changing pages to ensure marks align correctly
+        self.view.zoom_reset()
         
         # Ensure marks are in the scene
         for m in self.view.text_marks + self.view.option_marks:
@@ -918,6 +1300,23 @@ class OMRSoftware(QMainWindow):
             mat = fitz.Matrix(2, 2)
             pix = page.get_pixmap(matrix=mat)
             img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Apply auto-deskew if enabled
+            skew_angle = 0.0
+            if self.check_auto_deskew.isChecked():
+                img_np = np.array(img_pil)
+                img_corrected, skew_angle = deskew_image(img_np)
+                if skew_angle != 0.0:
+                    print(f"Page {p_idx + 1}: Corrected skew angle: {skew_angle:.2f}°")
+                    img_pil = Image.fromarray(img_corrected)
+
+            # Apply auto-align (shift) if enabled
+            if self.check_auto_align.isChecked():
+                img_np = np.array(img_pil)
+                img_aligned, (dx, dy), response = self.align_image(img_np)
+                if dx != 0.0 or dy != 0.0:
+                    print(f"Page {p_idx + 1}: Aligned shift dx={dx:.1f}, dy={dy:.1f} (score={response:.3f})")
+                    img_pil = Image.fromarray(img_aligned)
             
             # Get Image Offset for this page (where the image was positioned in the scene)
             # If user moved the image, marks are relative to scene origin (0,0)
@@ -1073,8 +1472,32 @@ class OMRSoftware(QMainWindow):
 
     def export_excel(self):
         if not hasattr(self, 'results'): return
-        fname, _ = QFileDialog.getSaveFileName(self, "Export Excel", "", "Excel (*.xlsx)")
+        prefix = self._get_pdf_prefix()
+        timestamp = self._get_timestamp()
+        default_name = f"{prefix}_{timestamp}.xlsx"
+        fname, _ = QFileDialog.getSaveFileName(self, "Export Excel", default_name, "Excel (*.xlsx)")
         if not fname: return
+
+        # Ensure filename includes prefix and timestamp
+        base_dir = os.path.dirname(fname)
+        fname = os.path.join(base_dir, default_name)
+        
+        # Import styling for highlighting empty cells
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        
+        # Define styles
+        yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Yellow for empty answers
+        orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")  # Orange for multiple selections
+        green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Light green for stats header
+        header_font = Font(bold=True)
+        center_align = Alignment(horizontal='center')
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
         
         wb = Workbook()
         ws = wb.active
@@ -1091,16 +1514,28 @@ class OMRSoftware(QMainWindow):
         sorted_qs = sorted(list(all_qs))
         sorted_texts = sorted(list(all_texts))
         
+        # Calculate column positions
+        # Column A = Page, then text fields, then questions, then Score
+        text_start_col = 2  # B
+        q_start_col = text_start_col + len(sorted_texts)  # After text fields
+        score_col = q_start_col + len(sorted_qs)  # After questions
+        
         # Headers: Page, [Text Fields], [Questions], Total Score
         headers = ["Page"] + sorted_texts + [f"Q{q}" for q in sorted_qs] + ["Score"]
         ws.append(headers)
         
-        # Key Row
+        # Key Row (row 2)
         key_row = ["Key"] + [""] * len(sorted_texts)
         for q in sorted_qs: key_row.append(self.answer_key.get(q, ""))
+        key_row.append("")  # No score for key row
         ws.append(key_row)
         
-        # Data
+        # Data rows start from row 3
+        data_row_num = 3
+        first_data_row = 3
+        empty_cells = []  # Track cells with empty answers for highlighting
+        multiple_cells = []  # Track cells with multiple selections for highlighting
+        
         for p_idx, res in self.results.items():
             if self.first_page_key and p_idx == 0: continue
             
@@ -1111,22 +1546,231 @@ class OMRSoftware(QMainWindow):
             for t_key in sorted_texts:
                 row.append(texts.get(t_key, ""))
                 
-            # Questions & Score
-            page_score = 0
+            # Questions - track empty answers and multiple selections
             opts = res.get("options", {})
-            
-            for q in sorted_qs:
+            for q_idx, q in enumerate(sorted_qs):
                 val = opts.get(q, "")
                 row.append(val)
-                correct = self.answer_key.get(q, "")
-                if correct and str(val).strip().lower() == str(correct).strip().lower():
-                    page_score += 1
+                col_letter = get_column_letter(q_start_col + q_idx)
+                # Track empty answers for highlighting
+                if val == "" or val is None:
+                    empty_cells.append(f"{col_letter}{data_row_num}")
+                # Track multiple selections (e.g., "AB", "BC") for highlighting
+                elif len(str(val)) > 1:
+                    multiple_cells.append(f"{col_letter}{data_row_num}")
             
-            row.append(page_score)
+            # Score formula using SUMPRODUCT to compare each answer with key row
+            # Formula: =SUMPRODUCT((C3:Z3=C$2:Z$2)*1) where C:Z are question columns
+            if sorted_qs:
+                first_q_col = get_column_letter(q_start_col)
+                last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
+                score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
+                row.append(score_formula)
+            else:
+                row.append(0)
+            
             ws.append(row)
+            data_row_num += 1
+        
+        last_data_row = data_row_num - 1
+        
+        # Apply yellow highlighting to empty answer cells
+        for cell_ref in empty_cells:
+            ws[cell_ref].fill = yellow_fill
+        
+        # Apply orange highlighting to multiple selection cells
+        for cell_ref in multiple_cells:
+            ws[cell_ref].fill = orange_fill
+        
+        # Add Statistics Row - Percentage correct per question
+        if sorted_qs and last_data_row >= first_data_row:
+            stats_row_num = data_row_num + 1  # Skip one row
+            
+            # Stats header row
+            ws.cell(row=stats_row_num, column=1, value="% Correct").fill = green_fill
+            ws.cell(row=stats_row_num, column=1).font = header_font
+            
+            # Add percentage formula for each question
+            # Formula: =COUNTIF(col_range, key_cell) / COUNT of non-empty cells * 100
+            for q_idx, q in enumerate(sorted_qs):
+                col_num = q_start_col + q_idx
+                col_letter = get_column_letter(col_num)
+                
+                # Calculate % correct: count matches with key / total responses
+                # =COUNTIF(C3:C10, C2) / COUNTA(C3:C10) * 100
+                # COUNTA counts non-empty cells
+                data_range = f"{col_letter}{first_data_row}:{col_letter}{last_data_row}"
+                key_cell = f"{col_letter}$2"
+                
+                percent_formula = f'=IF(COUNTA({data_range})>0, COUNTIF({data_range},{key_cell})/COUNTA({data_range})*100, 0)'
+                
+                cell = ws.cell(row=stats_row_num, column=col_num, value=percent_formula)
+                cell.fill = green_fill
+                cell.alignment = center_align
+                cell.number_format = '0.0"%"'
+            
+            # Average % correct in Score column
+            if sorted_qs:
+                first_q_col = get_column_letter(q_start_col)
+                last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
+                avg_formula = f'=AVERAGE({first_q_col}{stats_row_num}:{last_q_col}{stats_row_num})'
+                cell = ws.cell(row=stats_row_num, column=score_col, value=avg_formula)
+                cell.fill = green_fill
+                cell.alignment = center_align
+                cell.number_format = '0.0"%"'
+        
+        # Style header row
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=1, column=col).font = header_font
+            ws.cell(row=1, column=col).alignment = center_align
             
         wb.save(fname)
-        QMessageBox.information(self, "Done", "Export complete!")
+        
+        empty_count = len(empty_cells)
+        multiple_count = len(multiple_cells)
+        msg = "Export complete! Score is calculated by formula.\n"
+        if empty_count > 0:
+            msg += f"\n⚠️ {empty_count} empty answers highlighted in yellow."
+        if multiple_count > 0:
+            msg += f"\n🔶 {multiple_count} multiple selections highlighted in orange."
+        msg += "\n\n📊 Per-question % correct statistics added at bottom."
+        QMessageBox.information(self, "Done", msg)
+    
+    def export_images(self):
+        """Export scanned pages as images with answer overlay (red dots for correct answers)"""
+        if not hasattr(self, 'pdf_document') or self.pdf_document is None:
+            QMessageBox.warning(self, "Error", "No PDF loaded")
+            return
+
+        if not hasattr(self, 'view') or not self.view.option_marks:
+            QMessageBox.warning(self, "Error", "No option marks found")
+            return
+        
+        # Use PDF directory as default location
+        prefix = self._get_pdf_prefix()
+        timestamp = self._get_timestamp()
+        if hasattr(self, 'pdf_path') and self.pdf_path:
+            parent_folder = os.path.dirname(self.pdf_path)
+        else:
+            parent_folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+            if not parent_folder: return
+        
+        folder = os.path.join(parent_folder, f"{prefix}_{timestamp}")
+        os.makedirs(folder, exist_ok=True)
+        
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog("Exporting images...", "Cancel", 0, len(self.pdf_document), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        
+        for page_idx in range(len(self.pdf_document)):
+            if progress.wasCanceled(): break
+            progress.setValue(page_idx)
+            QtWidgets.QApplication.processEvents()
+            
+            # Render page at 2x scale
+            page = self.pdf_document[page_idx]
+            mat = fitz.Matrix(2, 2)
+            pix = page.get_pixmap(matrix=mat)
+
+            # Convert to numpy array for processing
+            img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img_np = np.array(img_pil)
+
+            # Apply auto-deskew if enabled
+            if self.check_auto_deskew.isChecked():
+                img_np, skew_angle = deskew_image(img_np)
+                if skew_angle != 0.0:
+                    print(f"Export page {page_idx + 1}: Corrected skew angle: {skew_angle:.2f}°")
+
+            # Apply auto-align (shift) if enabled
+            if self.check_auto_align.isChecked():
+                img_np, (dx, dy), response = self.align_image(img_np)
+                if dx != 0.0 or dy != 0.0:
+                    print(f"Export page {page_idx + 1}: Aligned shift dx={dx:.1f}, dy={dy:.1f} (score={response:.3f})")
+
+            # Convert to QImage for drawing
+            h, w = img_np.shape[:2]
+            qimg = QImage(img_np.data, w, h, img_np.strides[0], QImage.Format_RGB888).copy()
+            
+            # Create painter to draw overlay
+            painter = QPainter(qimg)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            # Get results for this page
+            page_results = self.results.get(page_idx, {}) if hasattr(self, 'results') else {}
+            opts = page_results.get("options", {})
+
+            # Offset for this page (if the PDF was moved in the scene)
+            off_x, off_y = self.page_offsets.get(page_idx, (0, 0))
+            
+            # Draw marks and answers
+            for mark in self.view.option_marks:
+                rect = mark.sceneBoundingRect()
+                q_num = mark.question_num
+                
+                if rect:
+                    x = int(rect.x() - off_x)
+                    y = int(rect.y() - off_y)
+                    w = int(rect.width())
+                    h = int(rect.height())
+                    
+                    # Draw rectangle border
+                    painter.setPen(QPen(QColor(0, 100, 255), 2))
+                    painter.drawRect(x, y, w, h)
+                    
+                    # Get student answer and correct answer
+                    # Ensure q_num is int for consistent key lookup
+                    q_num_int = int(q_num) if isinstance(q_num, (int, str)) and str(q_num).isdigit() else q_num
+                    student_answer = opts.get(q_num_int, "") or opts.get(q_num, "") or opts.get(str(q_num), "")
+                    correct_answer = self.answer_key.get(q_num_int, "") or self.answer_key.get(q_num, "") or self.answer_key.get(str(q_num), "")
+                    
+                    # Debug print
+                    if correct_answer:
+                        print(f"Q{q_num}: correct={correct_answer}")
+                    
+                    # Calculate cell positions for A, B, C, D
+                    num_options = getattr(mark, "options_count", 4)
+                    cell_width = w // num_options
+                    option_labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:num_options]
+                    
+                    for i, opt_label in enumerate(option_labels):
+                        cell_x = x + i * cell_width
+                        cell_center_x = cell_x + cell_width // 2
+                        cell_center_y = y + h // 2
+                        
+                        # Draw red dot for correct answer
+                        if correct_answer and opt_label.upper() == correct_answer.upper():
+                            # Must set both brush and pen before each ellipse
+                            painter.save()
+                            painter.setBrush(QBrush(QColor(255, 0, 0)))
+                            painter.setPen(QPen(QColor(255, 0, 0), 2))
+                            painter.drawEllipse(cell_center_x - 8, cell_center_y - 8, 16, 16)
+                            painter.restore()
+                        
+                        # Draw X mark for student's wrong answer
+                        if student_answer and opt_label.upper() == student_answer.upper():
+                            if correct_answer and student_answer.upper() != correct_answer.upper():
+                                # Wrong answer - draw X mark
+                                painter.save()
+                                painter.setPen(QPen(QColor(255, 0, 0), 3))
+                                painter.drawLine(cell_center_x - 8, cell_center_y - 8, cell_center_x + 8, cell_center_y + 8)
+                                painter.drawLine(cell_center_x + 8, cell_center_y - 8, cell_center_x - 8, cell_center_y + 8)
+                                painter.restore()
+                    
+                    # Draw question number
+                    painter.setPen(QPen(QColor(0, 0, 0), 1))
+                    painter.setFont(QFont("Arial", 10, QFont.Bold))
+                    painter.drawText(x - 30, y + h // 2 + 5, f"Q{q_num}")
+            
+            painter.end()
+            
+            # Save image
+            output_path = os.path.join(folder, f"page_{page_idx + 1:03d}.png")
+            qimg.save(output_path)
+        
+        progress.setValue(len(self.pdf_document))
+        QMessageBox.information(self, "Done", f"Exported {len(self.pdf_document)} images to:\n{folder}")
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
