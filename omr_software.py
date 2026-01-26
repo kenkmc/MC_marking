@@ -46,6 +46,7 @@ from openpyxl.styles import Font as XLFont, Alignment, Border, Side
 # Mark types
 MARK_TYPE_TEXT = "text"      # Text field (e.g., student name, ID)
 MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
+MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 
 def deskew_image(img_array):
@@ -197,8 +198,22 @@ class MovablePixmapItem(QGraphicsPixmapItem):
         self.setPos(x, y)
 
 
+# Resize handle size
+RESIZE_HANDLE_SIZE = 10
+
 class MarkItem(QGraphicsRectItem):
     """A resizable and movable rectangle for marking areas."""
+    
+    # Resize handles positions
+    HANDLE_NONE = 0
+    HANDLE_TOP_LEFT = 1
+    HANDLE_TOP_RIGHT = 2
+    HANDLE_BOTTOM_LEFT = 3
+    HANDLE_BOTTOM_RIGHT = 4
+    HANDLE_TOP = 5
+    HANDLE_BOTTOM = 6
+    HANDLE_LEFT = 7
+    HANDLE_RIGHT = 8
     
     def __init__(self, x, y, width, height, mark_type=MARK_TYPE_OPTION, 
                  question_num=1, label="", options_count=4, parent=None, view_ref=None):
@@ -208,6 +223,11 @@ class MarkItem(QGraphicsRectItem):
         self.label = label
         self.options_count = options_count
         self.view_ref = view_ref
+        
+        # Resize state
+        self.resize_handle = self.HANDLE_NONE
+        self.resize_start_rect = None
+        self.resize_start_pos = None
         
         self.setFlag(QGraphicsRectItem.ItemIsMovable, True)
         self.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
@@ -220,9 +240,121 @@ class MarkItem(QGraphicsRectItem):
         if self.mark_type == MARK_TYPE_TEXT:
             self.setPen(QPen(QColor(0, 100, 255), 2))
             self.setBrush(QBrush(QColor(0, 100, 255, 50)))
+        elif self.mark_type == MARK_TYPE_ALIGN:
+            self.setPen(QPen(QColor(0, 200, 0), 3, Qt.DashLine))
+            self.setBrush(QBrush(QColor(0, 200, 0, 30)))
         else:
             self.setPen(QPen(QColor(255, 0, 0), 2))
             self.setBrush(QBrush(QColor(255, 0, 0, 50)))
+    
+    def get_handle_at_pos(self, pos):
+        """Determine which resize handle (if any) is at the given position."""
+        rect = self.rect()
+        hs = RESIZE_HANDLE_SIZE
+        
+        # Corner handles
+        if QRectF(rect.x() - hs/2, rect.y() - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_TOP_LEFT
+        if QRectF(rect.right() - hs/2, rect.y() - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_TOP_RIGHT
+        if QRectF(rect.x() - hs/2, rect.bottom() - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_BOTTOM_LEFT
+        if QRectF(rect.right() - hs/2, rect.bottom() - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_BOTTOM_RIGHT
+        
+        # Edge handles
+        if QRectF(rect.x() + rect.width()/2 - hs/2, rect.y() - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_TOP
+        if QRectF(rect.x() + rect.width()/2 - hs/2, rect.bottom() - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_BOTTOM
+        if QRectF(rect.x() - hs/2, rect.y() + rect.height()/2 - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_LEFT
+        if QRectF(rect.right() - hs/2, rect.y() + rect.height()/2 - hs/2, hs, hs).contains(pos):
+            return self.HANDLE_RIGHT
+        
+        return self.HANDLE_NONE
+    
+    def get_cursor_for_handle(self, handle):
+        """Return the appropriate cursor for a resize handle."""
+        if handle in (self.HANDLE_TOP_LEFT, self.HANDLE_BOTTOM_RIGHT):
+            return Qt.SizeFDiagCursor
+        elif handle in (self.HANDLE_TOP_RIGHT, self.HANDLE_BOTTOM_LEFT):
+            return Qt.SizeBDiagCursor
+        elif handle in (self.HANDLE_TOP, self.HANDLE_BOTTOM):
+            return Qt.SizeVerCursor
+        elif handle in (self.HANDLE_LEFT, self.HANDLE_RIGHT):
+            return Qt.SizeHorCursor
+        return Qt.ArrowCursor
+    
+    def hoverMoveEvent(self, event):
+        """Change cursor when hovering over resize handles."""
+        handle = self.get_handle_at_pos(event.pos())
+        if handle != self.HANDLE_NONE:
+            self.setCursor(self.get_cursor_for_handle(handle))
+        else:
+            self.setCursor(Qt.SizeAllCursor)  # Move cursor when not on handle
+        super().hoverMoveEvent(event)
+    
+    def hoverLeaveEvent(self, event):
+        """Reset cursor when leaving the item."""
+        self.setCursor(Qt.ArrowCursor)
+        super().hoverLeaveEvent(event)
+    
+    def mousePressEvent(self, event):
+        """Start resize if clicking on a handle."""
+        if event.button() == Qt.LeftButton:
+            handle = self.get_handle_at_pos(event.pos())
+            if handle != self.HANDLE_NONE:
+                self.resize_handle = handle
+                self.resize_start_rect = self.rect()
+                self.resize_start_pos = event.pos()
+                self.setFlag(QGraphicsRectItem.ItemIsMovable, False)
+                event.accept()
+                return
+        self.setFlag(QGraphicsRectItem.ItemIsMovable, True)
+        super().mousePressEvent(event)
+    
+    def mouseMoveEvent(self, event):
+        """Handle resize dragging."""
+        if self.resize_handle != self.HANDLE_NONE:
+            delta = event.pos() - self.resize_start_pos
+            rect = QRectF(self.resize_start_rect)
+            
+            min_size = 20  # Minimum size
+            
+            if self.resize_handle == self.HANDLE_TOP_LEFT:
+                rect.setTopLeft(rect.topLeft() + delta)
+            elif self.resize_handle == self.HANDLE_TOP_RIGHT:
+                rect.setTopRight(rect.topRight() + delta)
+            elif self.resize_handle == self.HANDLE_BOTTOM_LEFT:
+                rect.setBottomLeft(rect.bottomLeft() + delta)
+            elif self.resize_handle == self.HANDLE_BOTTOM_RIGHT:
+                rect.setBottomRight(rect.bottomRight() + delta)
+            elif self.resize_handle == self.HANDLE_TOP:
+                rect.setTop(rect.top() + delta.y())
+            elif self.resize_handle == self.HANDLE_BOTTOM:
+                rect.setBottom(rect.bottom() + delta.y())
+            elif self.resize_handle == self.HANDLE_LEFT:
+                rect.setLeft(rect.left() + delta.x())
+            elif self.resize_handle == self.HANDLE_RIGHT:
+                rect.setRight(rect.right() + delta.x())
+            
+            # Ensure minimum size
+            if rect.width() >= min_size and rect.height() >= min_size:
+                self.setRect(rect.normalized())
+            
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+    
+    def mouseReleaseEvent(self, event):
+        """End resize operation."""
+        if self.resize_handle != self.HANDLE_NONE:
+            self.resize_handle = self.HANDLE_NONE
+            self.setFlag(QGraphicsRectItem.ItemIsMovable, True)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
         
     def paint(self, painter, option, widget):
         super().paint(painter, option, widget)
@@ -253,12 +385,38 @@ class MarkItem(QGraphicsRectItem):
             if self.label:
                 display_text += f" ({self.label})"
             painter.drawText(int(rect.x()), int(rect.y()) - 3, display_text)
+        elif self.mark_type == MARK_TYPE_ALIGN:
+            # Alignment reference - show label
+            painter.setPen(QPen(QColor(0, 150, 0)))
+            painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+            display_text = "📍 對齊參考區域 (Alignment Reference)"
+            if self.label:
+                display_text = f"📍 {self.label}"
+            painter.drawText(rect, Qt.AlignCenter, display_text)
         else:
             # Text field - just show the label
             painter.setPen(QPen(Qt.black))
             painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
             display_text = self.label if self.label else f"Field {self.question_num}"
             painter.drawText(rect, Qt.AlignCenter, display_text)
+        
+        # Draw resize handles when selected
+        if self.isSelected():
+            hs = RESIZE_HANDLE_SIZE
+            painter.setPen(QPen(QColor(0, 120, 215), 1))
+            painter.setBrush(QBrush(QColor(0, 120, 215)))
+            
+            # Corner handles
+            painter.drawRect(int(rect.x() - hs/2), int(rect.y() - hs/2), hs, hs)
+            painter.drawRect(int(rect.right() - hs/2), int(rect.y() - hs/2), hs, hs)
+            painter.drawRect(int(rect.x() - hs/2), int(rect.bottom() - hs/2), hs, hs)
+            painter.drawRect(int(rect.right() - hs/2), int(rect.bottom() - hs/2), hs, hs)
+            
+            # Edge handles
+            painter.drawRect(int(rect.x() + rect.width()/2 - hs/2), int(rect.y() - hs/2), hs, hs)
+            painter.drawRect(int(rect.x() + rect.width()/2 - hs/2), int(rect.bottom() - hs/2), hs, hs)
+            painter.drawRect(int(rect.x() - hs/2), int(rect.y() + rect.height()/2 - hs/2), hs, hs)
+            painter.drawRect(int(rect.right() - hs/2), int(rect.y() + rect.height()/2 - hs/2), hs, hs)
         
     def contextMenuEvent(self, event):
         menu = QMenu()
@@ -277,13 +435,18 @@ class MarkItem(QGraphicsRectItem):
         elif action == rename_action:
             new_label, ok = QInputDialog.getText(None, "Rename", "Enter new label:", text=self.label)
             if ok:
-                self.label = new_label
-                self.update()
+                self.set_label(new_label)
         elif self.mark_type == MARK_TYPE_OPTION and action == options_action:
             count, ok = QInputDialog.getInt(None, "Options Count", "Number of options:", self.options_count, 2, 26)
             if ok:
                 self.options_count = count
                 self.update()
+    
+    def set_label(self, new_label):
+        """Update the label and refresh the display."""
+        self.prepareGeometryChange()  # Notify scene of potential geometry change
+        self.label = new_label
+        self.update()  # Trigger repaint
 
     def get_data(self):
         scene_rect = self.sceneBoundingRect()
@@ -323,10 +486,13 @@ class MarkingView(QGraphicsView):
         # Marks storage
         self.text_marks = []
         self.option_marks = []
+        self.align_mark = None  # Only one alignment mark allowed
+        self.mark_history = []  # Track order of marks for undo
         
-        # Memory for size
-        self.last_option_size = (300, 50) # Default size
-        self.last_text_size = (200, 40)   # Default size
+        # Memory for size - reasonable defaults for typical answer sheets
+        self.last_option_size = (200, 35) # Default size for option boxes
+        self.last_text_size = (150, 30)   # Default size for text fields
+        self.last_align_size = (200, 80)  # Default alignment region size
         
         # Zoom
         self.zoom_factor = 1.0
@@ -345,8 +511,19 @@ class MarkingView(QGraphicsView):
         self.scene().removeItem(item)
         if item in self.text_marks:
             self.text_marks.remove(item)
+            # Restore counter if this was the last item with that number
+            if not any(m.question_num >= item.question_num for m in self.text_marks):
+                self.text_counter = item.question_num
         if item in self.option_marks:
             self.option_marks.remove(item)
+            # Restore counter if this was the last item with that number
+            if not any(m.question_num >= item.question_num for m in self.option_marks):
+                self.option_counter = item.question_num
+        if item == self.align_mark:
+            self.align_mark = None
+        # Remove from history if present
+        if item in self.mark_history:
+            self.mark_history.remove(item)
             
     def wheelEvent(self, event: QWheelEvent):
         if event.modifiers() == Qt.ControlModifier:
@@ -384,21 +561,18 @@ class MarkingView(QGraphicsView):
         if self.marking_mode and event.button() == Qt.LeftButton:
             self.start_point = self.mapToScene(event.pos())
             
-            # Use last known size for this type
-            width, height = 0, 0
-            
             if self.current_mark_type == MARK_TYPE_TEXT:
                 counter = self.text_counter
-                # Uncomment to start with default size immediately on click
-                # width, height = self.last_text_size 
             else:
                 counter = self.option_counter
-                # width, height = self.last_option_size
-                
+            
+            # Create MarkItem at start point with zero size initially
+            # Use local rect coordinates (0, 0, 0, 0) and set position via setPos
             self.current_rect = MarkItem(
-                self.start_point.x(), self.start_point.y(), width, height,
+                0, 0, 0, 0,
                 self.current_mark_type, counter, view_ref=self
             )
+            self.current_rect.setPos(self.start_point)
             self.scene().addItem(self.current_rect)
         else:
             super().mousePressEvent(event)
@@ -406,36 +580,80 @@ class MarkingView(QGraphicsView):
     def mouseMoveEvent(self, event):
         if self.marking_mode and self.current_rect and self.start_point:
             current_pos = self.mapToScene(event.pos())
-            rect = QRectF(self.start_point, current_pos).normalized()
-            self.current_rect.setRect(rect)
+            # Calculate width and height from start point
+            dx = current_pos.x() - self.start_point.x()
+            dy = current_pos.y() - self.start_point.y()
+            
+            # Handle dragging in any direction
+            if dx >= 0 and dy >= 0:
+                # Normal drag: down-right
+                self.current_rect.setPos(self.start_point)
+                self.current_rect.setRect(0, 0, dx, dy)
+            elif dx < 0 and dy >= 0:
+                # Drag left-down
+                self.current_rect.setPos(current_pos.x(), self.start_point.y())
+                self.current_rect.setRect(0, 0, -dx, dy)
+            elif dx >= 0 and dy < 0:
+                # Drag right-up
+                self.current_rect.setPos(self.start_point.x(), current_pos.y())
+                self.current_rect.setRect(0, 0, dx, -dy)
+            else:
+                # Drag left-up
+                self.current_rect.setPos(current_pos)
+                self.current_rect.setRect(0, 0, -dx, -dy)
         else:
             super().mouseMoveEvent(event)
             
     def mouseReleaseEvent(self, event):
         if self.marking_mode and self.current_rect:
             rect = self.current_rect.rect()
+            actual_width = rect.width()
+            actual_height = rect.height()
             
-            # If created box is too small, use default/last size
-            if rect.width() < 10 or rect.height() < 10:
+            print(f"  Mark created: rect=({rect.x():.1f},{rect.y():.1f}) size=({actual_width:.1f}x{actual_height:.1f})")
+            
+            # If created box is too small (user just clicked without dragging), use default/last size
+            # Threshold of 5 pixels to account for accidental small movements
+            min_threshold = 5
+            if actual_width < min_threshold or actual_height < min_threshold:
                 if self.current_mark_type == MARK_TYPE_TEXT:
                     w, h = self.last_text_size
+                elif self.current_mark_type == MARK_TYPE_ALIGN:
+                    w, h = self.last_align_size
                 else:
                     w, h = self.last_option_size
-                self.current_rect.setRect(self.start_point.x(), self.start_point.y(), w, h)
-                rect = self.current_rect.rect() # Update rect
+                # Reset position to start point and set proper size
+                self.current_rect.setPos(self.start_point)
+                self.current_rect.setRect(0, 0, w, h)
+                print(f"  Mark too small, using default size: ({w}x{h})")
+                actual_width = w
+                actual_height = h
                 
-            # Save size for next time
-            if rect.width() > 10 and rect.height() > 10:
+            # Save size for next time (only if box is valid)
+            if actual_width >= min_threshold and actual_height >= min_threshold:
                 if self.current_mark_type == MARK_TYPE_TEXT:
-                    self.last_text_size = (rect.width(), rect.height())
+                    self.last_text_size = (actual_width, actual_height)
                     self.text_marks.append(self.current_rect)
+                    self.mark_history.append(self.current_rect)  # Track for undo
                     self.text_counter += 1
+                elif self.current_mark_type == MARK_TYPE_ALIGN:
+                    self.last_align_size = (actual_width, actual_height)
+                    # Only one alignment mark allowed - remove old one
+                    if self.align_mark is not None:
+                        self.scene().removeItem(self.align_mark)
+                        if self.align_mark in self.mark_history:
+                            self.mark_history.remove(self.align_mark)
+                    self.align_mark = self.current_rect
+                    self.mark_history.append(self.current_rect)  # Track for undo
                 else:
-                    self.last_option_size = (rect.width(), rect.height())
+                    self.last_option_size = (actual_width, actual_height)
                     self.option_marks.append(self.current_rect)
+                    self.mark_history.append(self.current_rect)  # Track for undo
                     self.option_counter += 1
+                print(f"  Mark saved with size: ({actual_width:.1f}x{actual_height:.1f})")
             else:
                 self.scene().removeItem(self.current_rect)
+                print(f"  Mark removed (invalid size)")
             
             self.current_rect = None
             self.start_point = None
@@ -445,7 +663,8 @@ class MarkingView(QGraphicsView):
     def get_all_marks_data(self):
         marks_data = {
             "text_marks": [],
-            "option_marks": []
+            "option_marks": [],
+            "align_mark": None
         }
         for mark in self.text_marks:
             try: marks_data["text_marks"].append(mark.get_data())
@@ -453,6 +672,9 @@ class MarkingView(QGraphicsView):
         for mark in self.option_marks:
             try: marks_data["option_marks"].append(mark.get_data())
             except: continue
+        if self.align_mark:
+            try: marks_data["align_mark"] = self.align_mark.get_data()
+            except: pass
         return marks_data
         
     def load_marks_from_data(self, data):
@@ -515,16 +737,23 @@ class OMRSoftware(QMainWindow):
 
         return gray, 1.0, 1.0
 
-    def align_image(self, img_np):
+    def align_image(self, img_np, page_idx=0):
         """
-        Align current page to reference by detecting table/frame boundaries.
-        Uses edge detection to find the main table frame and align based on its position.
+        Align current page to reference using template matching on the alignment region.
+        If user defined an alignment region, use that for precise alignment.
+        Otherwise, fall back to automatic table boundary detection.
         Returns aligned image, (dx, dy), and confidence score.
         """
         if not hasattr(self, 'check_auto_align') or not self.check_auto_align.isChecked():
             return img_np, (0.0, 0.0), 0.0
 
-        # Find the main table boundaries in current image
+        h, w = img_np.shape[:2]
+        
+        # Check if user defined an alignment region
+        if hasattr(self, 'view') and self.view.align_mark is not None:
+            return self._align_using_template(img_np, page_idx)
+        
+        # Fall back to automatic table boundary detection
         cur_bounds = self._find_table_bounds(img_np)
         
         if cur_bounds is None:
@@ -551,13 +780,12 @@ class OMRSoftware(QMainWindow):
         cur_w = cur_bounds[2] - cur_bounds[0]
         cur_h = cur_bounds[3] - cur_bounds[1]
         
-        size_diff = abs(ref_w - cur_w) / ref_w + abs(ref_h - cur_h) / ref_h
+        size_diff = abs(ref_w - cur_w) / max(ref_w, 1) + abs(ref_h - cur_h) / max(ref_h, 1)
         if size_diff > 0.3:  # More than 30% size difference
             print(f"  Auto-align: Size difference too large ({size_diff:.2%}), skipping")
             return img_np, (0.0, 0.0), 0.5
         
         # Sanity check for extreme shifts
-        h, w = img_np.shape[:2]
         if abs(dx) > w * 0.2 or abs(dy) > h * 0.2:
             print(f"  Auto-align: Shift too large (dx={dx:.1f}, dy={dy:.1f}), skipping")
             return img_np, (0.0, 0.0), 0.3
@@ -576,6 +804,164 @@ class OMRSoftware(QMainWindow):
 
         aligned = cv2.warpAffine(img_np, M, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=border_value)
         return aligned, (dx, dy), 1.0 - size_diff
+    
+    def _align_using_template(self, img_np, page_idx):
+        """
+        Align image using template matching on the user-defined alignment region.
+        The alignment region from the first page is used as the template.
+        
+        This function corrects for small shifts caused by scanner feed variations,
+        typically within ±30-50 pixels. Larger shifts indicate a problem.
+        """
+        h, w = img_np.shape[:2]
+        
+        # First page: extract and store the template
+        if not hasattr(self, 'align_template') or self.align_template is None:
+            # Get alignment region coordinates from the mark
+            align_mark = self.view.align_mark
+            rect = align_mark.sceneBoundingRect()
+            off_x, off_y = self.page_offsets.get(0, (0, 0))  # Reference is always page 0
+            
+            # Convert scene coordinates to image coordinates
+            ref_x = int(rect.x() - off_x)
+            ref_y = int(rect.y() - off_y)
+            ref_w = int(rect.width())
+            ref_h = int(rect.height())
+            
+            # Ensure bounds are valid
+            ref_x = max(0, ref_x)
+            ref_y = max(0, ref_y)
+            
+            print(f"  Template align: Creating reference from region=({ref_x},{ref_y}) size=({ref_w}x{ref_h})")
+            
+            # Extract template from first page
+            if len(img_np.shape) == 3:
+                gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = img_np.copy()
+            
+            # Ensure we don't go out of bounds
+            end_x = min(ref_x + ref_w, gray.shape[1])
+            end_y = min(ref_y + ref_h, gray.shape[0])
+            
+            if end_x <= ref_x or end_y <= ref_y:
+                print("  Template align: Invalid template region")
+                return img_np, (0.0, 0.0), 0.0
+            
+            self.align_template = gray[ref_y:end_y, ref_x:end_x].copy()
+            self.align_template_pos = (ref_x, ref_y)
+            self.align_template_size = (end_x - ref_x, end_y - ref_y)  # Store actual extracted size
+            print(f"  Template align: Reference template extracted at ({ref_x},{ref_y}), size={self.align_template.shape}")
+            return img_np, (0.0, 0.0), 1.0
+        
+        # Subsequent pages: find template and calculate shift
+        if len(img_np.shape) == 3:
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_np.copy()
+        
+        template = self.align_template
+        template_h, template_w = template.shape[:2]
+        
+        # Use stored reference position
+        ref_x, ref_y = self.align_template_pos
+        ref_w, ref_h = self.align_template_size
+        
+        # Define search region - margin for scanner shift correction
+        # Scanner shift is typically 10-80 pixels, use 100 pixels margin
+        margin = 100  # Margin for typical scanner shift
+        
+        search_x1 = max(0, ref_x - margin)
+        search_y1 = max(0, ref_y - margin)
+        search_x2 = min(w, ref_x + ref_w + margin)
+        search_y2 = min(h, ref_y + ref_h + margin)
+        
+        search_region = gray[search_y1:search_y2, search_x1:search_x2]
+        
+        print(f"  Template align: Page {page_idx+1}, ref pos=({ref_x},{ref_y})")
+        print(f"  Template align: Search region=({search_x1},{search_y1})-({search_x2},{search_y2}), margin={margin}px")
+        print(f"  Template align: Template size={template.shape}, search region size={search_region.shape}")
+        
+        if search_region.shape[0] < template_h or search_region.shape[1] < template_w:
+            print("  Template align: Search region too small for template")
+            return img_np, (0.0, 0.0), 0.0
+        
+        # Perform template matching with sub-pixel accuracy
+        result = cv2.matchTemplate(search_region, template, cv2.TM_CCOEFF_NORMED)
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        
+        # Sub-pixel refinement using parabolic interpolation
+        # This gives more accurate alignment than integer pixel matching
+        px, py = max_loc
+        
+        # Only do sub-pixel if we're not at the edge of the result
+        if 0 < px < result.shape[1] - 1 and 0 < py < result.shape[0] - 1:
+            # Parabolic interpolation in x direction
+            fx_m1 = result[py, px - 1]
+            fx_0 = result[py, px]
+            fx_p1 = result[py, px + 1]
+            denom_x = 2 * (fx_m1 + fx_p1 - 2 * fx_0)
+            if abs(denom_x) > 1e-6:
+                sub_px = px - (fx_p1 - fx_m1) / denom_x
+            else:
+                sub_px = px
+            
+            # Parabolic interpolation in y direction
+            fy_m1 = result[py - 1, px]
+            fy_0 = result[py, px]
+            fy_p1 = result[py + 1, px]
+            denom_y = 2 * (fy_m1 + fy_p1 - 2 * fy_0)
+            if abs(denom_y) > 1e-6:
+                sub_py = py - (fy_p1 - fy_m1) / denom_y
+            else:
+                sub_py = py
+        else:
+            sub_px, sub_py = float(px), float(py)
+        
+        # max_loc is the top-left corner of the best match in search_region coordinates
+        # Convert to full image coordinates with sub-pixel accuracy
+        match_x = search_x1 + sub_px
+        match_y = search_y1 + sub_py
+        
+        # Calculate shift needed to align match position to reference position
+        dx = ref_x - match_x
+        dy = ref_y - match_y
+        
+        print(f"  Template align: Best match at ({match_x:.2f},{match_y:.2f}), confidence={max_val:.3f}")
+        print(f"  Template align: Shift needed: dx={dx:.2f}, dy={dy:.2f}")
+        
+        # Only align if confidence is good enough
+        if max_val < 0.5:
+            print(f"  Template align: Low confidence ({max_val:.3f}), skipping")
+            return img_np, (0.0, 0.0), max_val
+        
+        # Sanity check - shifts should be within the search margin
+        # This is the key fix: reject large shifts that indicate wrong matches
+        max_allowed_shift = margin - 5  # Leave some buffer
+        if abs(dx) > max_allowed_shift or abs(dy) > max_allowed_shift:
+            print(f"  Template align: Shift ({dx:.2f},{dy:.2f}) exceeds allowed range (±{max_allowed_shift}), skipping")
+            return img_np, (0.0, 0.0), 0.3
+        
+        # Apply shift even for small corrections (removed "negligible" check)
+        # Small shifts can accumulate and cause recognition errors
+        if abs(dx) < 0.5 and abs(dy) < 0.5:
+            print(f"  Template align: Shift very small ({dx:.2f},{dy:.2f}), no correction needed")
+            return img_np, (0.0, 0.0), max_val
+        
+        # Apply shift with sub-pixel accuracy using cv2.warpAffine
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        if len(img_np.shape) == 3:
+            border_value = (255, 255, 255)
+        else:
+            border_value = 255
+
+        # Use INTER_LINEAR for sub-pixel accuracy
+        aligned = cv2.warpAffine(img_np, M, (w, h), 
+                                  flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_CONSTANT, 
+                                  borderValue=border_value)
+        print(f"  Template align: ✓ Applied correction dx={dx:.2f}, dy={dy:.2f}")
+        return aligned, (dx, dy), max_val
     
     def _find_table_bounds(self, img_np):
         """
@@ -854,60 +1240,70 @@ class OMRSoftware(QMainWindow):
             min_combined = min(s['combined'] for s in cell_scores)
             score_range = max_combined - min_combined
             
-            # Dynamic threshold based on score range
-            # If there's clear variation, use relative threshold
-            # Otherwise, use absolute threshold
+            # Get the max darkness score (actual gray difference from overall mean)
+            max_darkness = max(s['darkness'] for s in cell_scores)
             
-            print(f"  Score range: {min_combined:.1f} to {max_combined:.1f} (range={score_range:.1f})")
+            print(f"  Score range: {min_combined:.1f} to {max_combined:.1f} (range={score_range:.1f}), max_darkness={max_darkness:.1f}")
             
-            # Adaptive thresholding for light marks
-            # Much lower thresholds to detect very faint pencil marks
+            # SMART DETECTION: Focus on RELATIVE differences between options
+            # Key insight: A filled mark should stand out clearly from other options
+            # Even light marks should have a significant score_range
             
-            # Method 1: If there's clear variation, use the highest scoring option
-            if score_range > 1.5:  # Even small variation matters (lowered from 2)
-                # Find the option with highest combined score
-                max_score_option = max(cell_scores, key=lambda s: s['combined'])
+            # Primary detection: Check if one option clearly stands out
+            # Uses relative thresholds based on the score distribution
+            
+            # Minimum thresholds - lowered to catch lighter marks
+            MIN_COMBINED_THRESHOLD = 8.0   # Minimum combined score for filled mark
+            MIN_DARKNESS_THRESHOLD = 3.0   # Minimum darkness difference
+            MIN_SCORE_RANGE = 10.0  # Minimum range - the key indicator of a filled mark
+            
+            # For blank detection: if ALL scores are very close and low, it's blank
+            # Only definitely blank if range is very small AND all scores are near zero
+            BLANK_MAX_RANGE = 6.0
+            BLANK_MAX_COMBINED = 5.0
+            
+            # Check if this is clearly blank (all options look the same)
+            is_clearly_blank = (
+                score_range < BLANK_MAX_RANGE and 
+                max_combined < BLANK_MAX_COMBINED
+            )
+            
+            if is_clearly_blank:
+                print(f"  No option filled: clearly blank (range={score_range:.1f}, max={max_combined:.1f})")
+            elif score_range >= MIN_SCORE_RANGE:
+                # Good score range means one option stands out - use relative threshold
+                # The filled option should be significantly higher than others
                 
-                # Pick options that are close to the maximum (within 30% of range from top)
-                threshold_combined = max_combined - score_range * 0.35
+                # Calculate threshold: top 30% of the score range
+                threshold = max_combined - score_range * 0.3
                 
-                # Very low minimum absolute threshold for light marks
-                min_absolute = 1.0  # Very low to catch faint marks
-                
+                # Also ensure minimum absolute scores
                 for score in cell_scores:
-                    if score['combined'] >= threshold_combined and score['combined'] >= min_absolute:
+                    if (score['combined'] >= threshold and 
+                        score['combined'] >= MIN_COMBINED_THRESHOLD and
+                        score['darkness'] >= MIN_DARKNESS_THRESHOLD):
                         filled_options.append(score['option'])
                 
-                # If still no detection but there's a clear winner, pick it
-                if not filled_options and max_combined > 0.5:
-                    filled_options.append(max_score_option['option'])
-                        
-                print(f"  Threshold (relative): {threshold_combined:.1f}, min_absolute: {min_absolute}")
-            else:
-                # No clear variation - use standard deviation analysis
-                # Check if any option has significantly lower gray mean (darker)
-                gray_means = [s['gray_mean'] for s in cell_scores]
-                gray_std_overall = np.std(gray_means) if len(gray_means) > 1 else 0
-                
-                if gray_std_overall > 1:  # There's some variation in gray levels
-                    min_gray = min(gray_means)
-                    for score in cell_scores:
-                        # Pick options that are darker than average
-                        if score['gray_mean'] <= min_gray + gray_std_overall * 0.5:
-                            if score['darkness'] > 0:  # Must be at least slightly darker
-                                filled_options.append(score['option'])
-                    print(f"  Using gray std analysis: std={gray_std_overall:.1f}")
+                if filled_options:
+                    print(f"  Threshold: {threshold:.1f} (range-based detection)")
                 else:
-                    # Fallback: very low absolute threshold
-                    threshold_combined = 1.5  # Very low for light marks
-                    
-                    for score in cell_scores:
-                        if score['combined'] > threshold_combined:
-                            filled_options.append(score['option'])
-                            
-                    print(f"  Threshold (absolute): {threshold_combined}")
-                        
-                print(f"  Threshold (absolute): {threshold_combined}")
+                    print(f"  No option filled: scores below minimum (threshold={threshold:.1f}, min_comb={MIN_COMBINED_THRESHOLD})")
+            elif max_combined >= MIN_COMBINED_THRESHOLD * 1.5 and max_darkness >= MIN_DARKNESS_THRESHOLD * 1.5:
+                # Smaller range but high absolute scores - still might be a mark
+                threshold = max_combined - score_range * 0.4
+                
+                for score in cell_scores:
+                    if (score['combined'] >= threshold and 
+                        score['combined'] >= MIN_COMBINED_THRESHOLD and
+                        score['darkness'] >= MIN_DARKNESS_THRESHOLD):
+                        filled_options.append(score['option'])
+                
+                if filled_options:
+                    print(f"  Threshold: {threshold:.1f} (absolute-score detection)")
+                else:
+                    print(f"  No option filled: range too small (range={score_range:.1f})")
+            else:
+                print(f"  No option filled: scores too low (max_comb={max_combined:.1f}, max_dark={max_darkness:.1f}, range={score_range:.1f})")
         
         result = "".join(filled_options)
         print(f"  Detected filled option(s): {result if result else '(none)'}")
@@ -916,6 +1312,8 @@ class OMRSoftware(QMainWindow):
     def get_ocr_result(self, image, save_debug=False):
         """Perform OCR on the given PIL image and return text with confidence info."""
         import numpy as np
+        import cv2
+        from PIL import Image
         
         # Debug: Save cropped image to see what's being recognized
         if save_debug:
@@ -935,37 +1333,106 @@ class OMRSoftware(QMainWindow):
             print("  ERROR: Empty image!")
             return "[Empty Image]"
         
+        # Preprocess for better OCR (contrast, denoise, resize, threshold)
+        def preprocess_for_ocr(pil_img):
+            arr = np.array(pil_img)
+            if len(arr.shape) == 3:
+                gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+            else:
+                gray = arr.copy()
+
+            # Normalize contrast
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+            # Upscale small crops for better OCR
+            h, w = gray.shape
+            target_h = 60
+            scale = target_h / max(1, h) if h < target_h else 1.0
+            if scale > 1.0:
+                gray = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+
+            # Denoise
+            gray = cv2.fastNlMeansDenoising(gray, None, h=12, templateWindowSize=7, searchWindowSize=21)
+
+            # Sharpen
+            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+            gray = cv2.filter2D(gray, -1, kernel)
+
+            # Adaptive threshold (binary)
+            block_size = 31 if gray.shape[0] >= 31 else 15
+            if block_size % 2 == 0:
+                block_size += 1
+            binary = cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block_size, 11
+            )
+
+            return arr, gray, binary
+
+        orig_np, gray_np, bin_np = preprocess_for_ocr(image)
+
+        if save_debug:
+            import os
+            debug_dir = "debug_crops"
+            os.makedirs(debug_dir, exist_ok=True)
+            import time
+            base = int(time.time()*1000)
+            Image.fromarray(gray_np).save(os.path.join(debug_dir, f"crop_gray_{base}.png"))
+            Image.fromarray(bin_np).save(os.path.join(debug_dir, f"crop_bin_{base}.png"))
+
         if self.ocr_engine_name == "easyocr":
             if self.ocr_reader is None:
                 import easyocr
                 # Initialize for English and Traditional Chinese
                 print("  Initializing EasyOCR reader (this may take a moment)...")
                 self.ocr_reader = easyocr.Reader(['en', 'ch_tra'], verbose=False) 
-            
-            # Get detailed results with confidence
-            result = self.ocr_reader.readtext(img_np, detail=1)
-            
-            if not result:
-                print("  EasyOCR: No text detected")
-                return ""
-            
-            texts = []
-            for detection in result:
-                bbox, text, confidence = detection
-                print(f"  EasyOCR detected: '{text}' (confidence: {confidence:.2%})")
-                texts.append(text)
-            
-            return " ".join(texts)
+
+            def run_easyocr(np_img, label):
+                result = self.ocr_reader.readtext(
+                    np_img,
+                    detail=1,
+                    paragraph=False,
+                    contrast_ths=0.1,
+                    adjust_contrast=0.6,
+                    text_threshold=0.5,
+                    low_text=0.35,
+                    link_threshold=0.4
+                )
+                if not result:
+                    print(f"  EasyOCR: No text detected ({label})")
+                    return ""
+                texts = []
+                for detection in result:
+                    bbox, text, confidence = detection
+                    print(f"  EasyOCR detected: '{text}' (confidence: {confidence:.2%}, {label})")
+                    texts.append(text)
+                return " ".join(texts)
+
+            # Try original, then preprocessed grayscale, then binary
+            text = run_easyocr(orig_np, "orig")
+            if not text:
+                text = run_easyocr(cv2.cvtColor(gray_np, cv2.COLOR_GRAY2RGB), "gray")
+            if not text:
+                text = run_easyocr(cv2.cvtColor(bin_np, cv2.COLOR_GRAY2RGB), "binary")
+            return text
         
         elif self.ocr_engine_name == "tesseract":
             import pytesseract
             # Default to eng+chi_tra
             try:
-                text = pytesseract.image_to_string(image, lang='eng+chi_tra').strip()
+                config_main = "--oem 1 --psm 6"
+                text = pytesseract.image_to_string(image, lang='eng+chi_tra', config=config_main).strip()
+                if not text:
+                    text = pytesseract.image_to_string(Image.fromarray(gray_np), lang='eng+chi_tra', config=config_main).strip()
+                if not text:
+                    text = pytesseract.image_to_string(Image.fromarray(bin_np), lang='eng+chi_tra', config="--oem 1 --psm 7").strip()
                 print(f"  Tesseract detected: '{text}'")
                 return text
             except:
-                text = pytesseract.image_to_string(image, lang='eng').strip()
+                text = pytesseract.image_to_string(image, lang='eng', config="--oem 1 --psm 6").strip()
+                if not text:
+                    text = pytesseract.image_to_string(Image.fromarray(gray_np), lang='eng', config="--oem 1 --psm 6").strip()
+                if not text:
+                    text = pytesseract.image_to_string(Image.fromarray(bin_np), lang='eng', config="--oem 1 --psm 7").strip()
                 print(f"  Tesseract detected: '{text}'")
                 return text
         
@@ -1032,9 +1499,24 @@ class OMRSoftware(QMainWindow):
         row1.addWidget(self.btn_mark_option)
         m_layout.addLayout(row1)
         
+        # Alignment reference button
+        row1_5 = QHBoxLayout()
+        self.btn_mark_align = QPushButton("📍 Mark Alignment Region")
+        self.btn_mark_align.setCheckable(True)
+        self.btn_mark_align.setToolTip("Mark a reference region (e.g., a table corner) for aligning scanned pages")
+        self.btn_mark_align.clicked.connect(lambda: self.set_marking(MARK_TYPE_ALIGN))
+        row1_5.addWidget(self.btn_mark_align)
+        m_layout.addLayout(row1_5)
+        
         m_layout.addWidget(QLabel("Right-click marks to Rename/Delete/Config"))
+        m_layout.addWidget(QLabel("Click mark to select, then drag corners to resize"))
         
         row2 = QHBoxLayout()
+        btn_undo = QPushButton("↩ Undo")
+        btn_undo.setToolTip("Remove the last added mark")
+        btn_undo.clicked.connect(self.undo_last_mark)
+        row2.addWidget(btn_undo)
+        
         btn_clear = QPushButton("Clear All")
         btn_clear.setObjectName("deleteBtn")
         btn_clear.clicked.connect(self.clear_all_marks)
@@ -1072,6 +1554,22 @@ class OMRSoftware(QMainWindow):
         p_layout.addWidget(btn_export_img)
         
         left_layout.addWidget(proc_grp)
+        
+        # Batch Processing
+        batch_grp = QGroupBox("4. Batch Processing")
+        b_layout = QVBoxLayout(batch_grp)
+        
+        btn_batch_same = QPushButton("📁 Batch: Same Template")
+        btn_batch_same.setToolTip("Select one template and multiple PDFs to process")
+        btn_batch_same.clicked.connect(self.batch_process_same_template)
+        b_layout.addWidget(btn_batch_same)
+        
+        btn_batch_match = QPushButton("📁 Batch: Match Template Names")
+        btn_batch_match.setToolTip("Select multiple PDFs. For each PDF, auto-load template with same name.\nExample: exam1.pdf uses exam1.json")
+        btn_batch_match.clicked.connect(self.batch_process_matched_templates)
+        b_layout.addWidget(btn_batch_match)
+        
+        left_layout.addWidget(batch_grp)
         
         left_layout.addStretch()
         left_scroll.setWidget(left_content)
@@ -1113,6 +1611,13 @@ class OMRSoftware(QMainWindow):
         nav_layout.addWidget(self.lbl_page)
         nav_layout.addWidget(btn_next)
         nav_layout.addStretch()
+        
+        # Correction info label
+        self.lbl_correction = QLabel("")
+        self.lbl_correction.setMinimumWidth(200)
+        nav_layout.addWidget(self.lbl_correction)
+        nav_layout.addStretch()
+        
         nav_layout.addWidget(QLabel("Zoom:"))
         nav_layout.addWidget(btn_zoom_out)
         nav_layout.addWidget(btn_zoom_reset)
@@ -1150,10 +1655,17 @@ class OMRSoftware(QMainWindow):
         if mtype == MARK_TYPE_TEXT:
             is_checked = self.btn_mark_text.isChecked()
             self.btn_mark_option.setChecked(False)
+            self.btn_mark_align.setChecked(False)
             self.view.set_marking_mode(is_checked, MARK_TYPE_TEXT)
+        elif mtype == MARK_TYPE_ALIGN:
+            is_checked = self.btn_mark_align.isChecked()
+            self.btn_mark_text.setChecked(False)
+            self.btn_mark_option.setChecked(False)
+            self.view.set_marking_mode(is_checked, MARK_TYPE_ALIGN)
         else:
             is_checked = self.btn_mark_option.isChecked()
             self.btn_mark_text.setChecked(False)
+            self.btn_mark_align.setChecked(False)
             self.view.set_marking_mode(is_checked, MARK_TYPE_OPTION)
 
     def import_pdf(self):
@@ -1163,9 +1675,15 @@ class OMRSoftware(QMainWindow):
                 self.pdf_path = fname
                 self.pdf_document = fitz.open(fname)
                 self.current_page = 0
+                # Reset all alignment references when loading new PDF
                 self.align_reference_gray = None
                 self.align_reference_size = None
-                self.load_page(0)
+                self.align_reference_bounds = None
+                self.align_template = None
+                self.align_template_pos = None
+                self.align_template_size = None
+                # Load first page with corrections to initialize alignment reference
+                self.load_page(0, apply_corrections=True)
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
 
@@ -1178,7 +1696,7 @@ class OMRSoftware(QMainWindow):
     def _get_timestamp(self):
         return QtCore.QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
 
-    def load_page(self, p_idx):
+    def load_page(self, p_idx, apply_corrections=True):
         if not self.pdf_document: return
         
         # Save current image offset
@@ -1192,7 +1710,34 @@ class OMRSoftware(QMainWindow):
         page = self.pdf_document[p_idx]
         mat = fitz.Matrix(2, 2)
         pix = page.get_pixmap(matrix=mat)
-        img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888)
+        
+        # Convert to numpy array for processing
+        img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img_np = np.array(img_pil)
+        
+        correction_info = []
+        
+        # Apply corrections if enabled
+        if apply_corrections:
+            # Apply auto-deskew if enabled
+            if hasattr(self, 'check_auto_deskew') and self.check_auto_deskew.isChecked():
+                img_np, skew_angle = deskew_image(img_np)
+                if skew_angle != 0.0:
+                    correction_info.append(f"傾斜校正: {skew_angle:.2f}°")
+            
+            # Apply auto-align (shift) if enabled and alignment mark exists
+            if hasattr(self, 'check_auto_align') and self.check_auto_align.isChecked():
+                if hasattr(self, 'view') and self.view.align_mark is not None:
+                    # Page 0 initializes the template, other pages get aligned
+                    img_np, (dx, dy), confidence = self.align_image(img_np, p_idx)
+                    if p_idx == 0:
+                        correction_info.append("對齊參考已設定")
+                    elif dx != 0.0 or dy != 0.0:
+                        correction_info.append(f"位移校正: dx={dx:.1f}, dy={dy:.1f}")
+        
+        # Convert back to QImage
+        h, w = img_np.shape[:2]
+        img = QImage(img_np.data, w, h, img_np.strides[0], QImage.Format_RGB888).copy()
         
         # Remove only the pixmap item, not the marks
         if self.current_pixmap_item is not None:
@@ -1210,7 +1755,14 @@ class OMRSoftware(QMainWindow):
         self.scene.addItem(self.current_pixmap_item)
         # Move pixmap to back so marks are visible on top
         self.current_pixmap_item.setZValue(-1)
-        self.view.setSceneRect(QRectF(0, 0, pix.width, pix.height))
+        self.view.setSceneRect(QRectF(0, 0, w, h))
+        
+        # Update correction info label
+        if hasattr(self, 'lbl_correction') and correction_info:
+            self.lbl_correction.setText(" | ".join(correction_info))
+            self.lbl_correction.setStyleSheet("color: green; font-weight: bold;")
+        elif hasattr(self, 'lbl_correction'):
+            self.lbl_correction.setText("")
         
         # Reset zoom when changing pages to ensure marks align correctly
         self.view.zoom_reset()
@@ -1219,6 +1771,10 @@ class OMRSoftware(QMainWindow):
         for m in self.view.text_marks + self.view.option_marks:
             if m.scene() is None:
                 self.scene.addItem(m)
+        
+        # Ensure alignment mark is in the scene
+        if self.view.align_mark is not None and self.view.align_mark.scene() is None:
+            self.scene.addItem(self.view.align_mark)
 
         # Update table for this page result if available
         self.update_result_table()
@@ -1231,13 +1787,60 @@ class OMRSoftware(QMainWindow):
         if self.pdf_document and self.current_page < len(self.pdf_document) - 1:
             self.load_page(self.current_page + 1)
 
+    def undo_last_mark(self):
+        """Remove the last added mark (option or text) and restore counter"""
+        if not hasattr(self.view, 'mark_history') or not self.view.mark_history:
+            # Check if there are any marks to remove
+            if self.view.align_mark:
+                self.scene.removeItem(self.view.align_mark)
+                self.view.align_mark = None
+                self.align_template = None
+                self.align_template_pos = None
+                self.align_template_size = None
+                print("Undo: Removed alignment mark")
+            else:
+                print("Undo: No marks to remove")
+            return
+        
+        last_mark = self.view.mark_history.pop()
+        
+        if last_mark in self.view.text_marks:
+            self.view.text_marks.remove(last_mark)
+            # Restore counter to the removed item's question number
+            self.view.text_counter = last_mark.question_num
+            print(f"Undo: Removed text mark Q{last_mark.question_num} ('{last_mark.label}'), counter reset to {self.view.text_counter}")
+        elif last_mark in self.view.option_marks:
+            self.view.option_marks.remove(last_mark)
+            # Restore counter to the removed item's question number
+            self.view.option_counter = last_mark.question_num
+            print(f"Undo: Removed option mark Q{last_mark.question_num} ('{last_mark.label}'), counter reset to {self.view.option_counter}")
+        elif last_mark == self.view.align_mark:
+            self.view.align_mark = None
+            # Also reset alignment template
+            self.align_template = None
+            self.align_template_pos = None
+            self.align_template_size = None
+            print("Undo: Removed alignment mark")
+        
+        self.scene.removeItem(last_mark)
+
     def clear_all_marks(self):
         for m in self.view.text_marks + self.view.option_marks:
             self.scene.removeItem(m)
+        if self.view.align_mark is not None:
+            self.scene.removeItem(self.view.align_mark)
+            self.view.align_mark = None
         self.view.text_marks.clear()
         self.view.option_marks.clear()
+        self.view.mark_history.clear()  # Clear undo history
         self.view.text_counter = 1
         self.view.option_counter = 1
+        # Reset alignment reference
+        self.align_reference_gray = None
+        self.align_reference_bounds = None
+        self.align_template = None
+        self.align_template_pos = None
+        self.align_template_size = None
 
     def export_template(self):
         data = self.view.get_all_marks_data()
@@ -1254,16 +1857,27 @@ class OMRSoftware(QMainWindow):
             self.clear_all_marks()
             
             for m in data.get("text_marks", []):
-                item = MarkItem(m['x'], m['y'], m['width'], m['height'], MARK_TYPE_TEXT, m['question'], m['label'], view_ref=self.view)
+                item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_TEXT, m['question'], m['label'], view_ref=self.view)
+                item.setPos(m['x'], m['y'])
                 self.view.text_marks.append(item)
                 self.scene.addItem(item)
                 self.view.text_counter = max(self.view.text_counter, m['question'] + 1)
                 
             for m in data.get("option_marks", []):
-                item = MarkItem(m['x'], m['y'], m['width'], m['height'], MARK_TYPE_OPTION, m['question'], m['label'], m.get('options_count', 4), view_ref=self.view)
+                item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_OPTION, m['question'], m['label'], m.get('options_count', 4), view_ref=self.view)
+                item.setPos(m['x'], m['y'])
                 self.view.option_marks.append(item)
                 self.scene.addItem(item)
                 self.view.option_counter = max(self.view.option_counter, m['question'] + 1)
+            
+            # Load alignment mark if exists
+            align_data = data.get("align_mark")
+            if align_data:
+                item = MarkItem(0, 0, align_data['width'], align_data['height'], MARK_TYPE_ALIGN, 
+                               align_data.get('question', 1), align_data.get('label', ''), view_ref=self.view)
+                item.setPos(align_data['x'], align_data['y'])
+                self.view.align_mark = item
+                self.scene.addItem(item)
 
     def run_recognition_all(self):
         if not self.pdf_document: 
@@ -1278,6 +1892,13 @@ class OMRSoftware(QMainWindow):
         # Save current page's image offset before processing
         if self.current_pixmap_item:
             self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
+        
+        # Reset alignment template for new recognition run
+        self.align_template = None
+        self.align_template_pos = None
+        self.align_template_size = None
+        self.align_reference_gray = None
+        self.align_reference_bounds = None
         
         # Progress Dialog
         progress = QtWidgets.QProgressDialog("Recognizing...", "Cancel", 0, len(self.pdf_document), self)
@@ -1313,7 +1934,7 @@ class OMRSoftware(QMainWindow):
             # Apply auto-align (shift) if enabled
             if self.check_auto_align.isChecked():
                 img_np = np.array(img_pil)
-                img_aligned, (dx, dy), response = self.align_image(img_np)
+                img_aligned, (dx, dy), response = self.align_image(img_np, p_idx)
                 if dx != 0.0 or dy != 0.0:
                     print(f"Page {p_idx + 1}: Aligned shift dx={dx:.1f}, dy={dy:.1f} (score={response:.3f})")
                     img_pil = Image.fromarray(img_aligned)
@@ -1658,6 +2279,13 @@ class OMRSoftware(QMainWindow):
         folder = os.path.join(parent_folder, f"{prefix}_{timestamp}")
         os.makedirs(folder, exist_ok=True)
         
+        # Reset alignment template for export
+        self.align_template = None
+        self.align_template_pos = None
+        self.align_template_size = None
+        self.align_reference_gray = None
+        self.align_reference_bounds = None
+        
         from PyQt5.QtWidgets import QProgressDialog
         progress = QProgressDialog("Exporting images...", "Cancel", 0, len(self.pdf_document), self)
         progress.setWindowModality(Qt.WindowModal)
@@ -1685,7 +2313,7 @@ class OMRSoftware(QMainWindow):
 
             # Apply auto-align (shift) if enabled
             if self.check_auto_align.isChecked():
-                img_np, (dx, dy), response = self.align_image(img_np)
+                img_np, (dx, dy), response = self.align_image(img_np, page_idx)
                 if dx != 0.0 or dy != 0.0:
                     print(f"Export page {page_idx + 1}: Aligned shift dx={dx:.1f}, dy={dy:.1f} (score={response:.3f})")
 
@@ -1771,6 +2399,551 @@ class OMRSoftware(QMainWindow):
         
         progress.setValue(len(self.pdf_document))
         QMessageBox.information(self, "Done", f"Exported {len(self.pdf_document)} images to:\n{folder}")
+
+    # ==================== Batch Processing ====================
+    
+    def batch_process_same_template(self):
+        """
+        Batch process multiple PDFs using the same template.
+        User selects one template file and multiple PDF files.
+        Results are exported to the same folder as each PDF.
+        """
+        # Step 1: Select template file
+        template_file, _ = QFileDialog.getOpenFileName(
+            self, "Select Template File", "", "JSON (*.json)"
+        )
+        if not template_file:
+            return
+        
+        # Step 2: Select multiple PDF files
+        pdf_files, _ = QFileDialog.getOpenFileNames(
+            self, "Select PDF Files to Process", "", "PDF Files (*.pdf)"
+        )
+        if not pdf_files:
+            return
+        
+        # Confirm
+        reply = QMessageBox.question(
+            self, "Confirm Batch Process",
+            f"Process {len(pdf_files)} PDF files with template:\n{os.path.basename(template_file)}\n\n"
+            f"Each PDF will have Excel and Images exported to its folder.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Load template once
+        try:
+            with open(template_file, 'r') as f:
+                template_data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load template:\n{e}")
+            return
+        
+        # Process each PDF
+        self._batch_process_pdfs(pdf_files, template_data, template_file)
+    
+    def batch_process_matched_templates(self):
+        """
+        Batch process multiple PDFs where each PDF has a matching template file.
+        Template name must match PDF name (e.g., exam1.pdf uses exam1.json).
+        Results are exported to the same folder as each PDF.
+        """
+        # Select multiple PDF files
+        pdf_files, _ = QFileDialog.getOpenFileNames(
+            self, "Select PDF Files to Process", "", "PDF Files (*.pdf)"
+        )
+        if not pdf_files:
+            return
+        
+        # Check for matching templates
+        matched = []
+        unmatched = []
+        
+        for pdf_path in pdf_files:
+            pdf_dir = os.path.dirname(pdf_path)
+            pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
+            template_path = os.path.join(pdf_dir, f"{pdf_name}.json")
+            
+            if os.path.exists(template_path):
+                matched.append((pdf_path, template_path))
+            else:
+                unmatched.append(pdf_path)
+        
+        # Show warning for unmatched files
+        msg = f"Found {len(matched)} PDFs with matching templates.\n"
+        if unmatched:
+            msg += f"\n⚠️ {len(unmatched)} PDFs without matching template (will be skipped):\n"
+            for p in unmatched[:5]:  # Show first 5
+                msg += f"  • {os.path.basename(p)}\n"
+            if len(unmatched) > 5:
+                msg += f"  ... and {len(unmatched) - 5} more\n"
+        
+        if not matched:
+            QMessageBox.warning(self, "No Matches", "No PDF files have matching template files.")
+            return
+        
+        msg += "\nContinue with batch processing?"
+        reply = QMessageBox.question(self, "Confirm Batch Process", msg, QMessageBox.Yes | QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        
+        # Process each matched PDF
+        self._batch_process_pdfs_matched(matched)
+    
+    def _batch_process_pdfs(self, pdf_files, template_data, template_name):
+        """Internal method to process multiple PDFs with the same template."""
+        progress = QtWidgets.QProgressDialog(
+            "Batch processing...", "Cancel", 0, len(pdf_files), self
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        success_count = 0
+        error_files = []
+        
+        for idx, pdf_path in enumerate(pdf_files):
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                break
+            
+            progress.setValue(idx)
+            progress.setLabelText(f"Processing: {os.path.basename(pdf_path)}")
+            
+            try:
+                # Load template
+                self._load_template_data(template_data)
+                
+                # Load PDF
+                self.pdf_path = pdf_path
+                self.pdf_document = fitz.open(pdf_path)
+                self.current_page = 0
+                self.align_reference_gray = None
+                self.load_page(0)
+                
+                # Reset alignment template for new PDF
+                self.align_template = None
+                self.align_template_pos = None
+                self.align_template_size = None
+                
+                # Run recognition
+                self._run_recognition_internal()
+                
+                # Export results to same folder as PDF
+                output_folder = os.path.dirname(pdf_path)
+                pdf_basename = os.path.splitext(os.path.basename(pdf_path))[0]
+                timestamp = self._get_timestamp()
+                
+                # Export Excel
+                excel_path = os.path.join(output_folder, f"{pdf_basename}_{timestamp}.xlsx")
+                self._export_excel_internal(excel_path)
+                
+                # Export Images
+                img_folder = os.path.join(output_folder, f"{pdf_basename}_{timestamp}")
+                self._export_images_internal(img_folder)
+                
+                success_count += 1
+                print(f"✓ Processed: {os.path.basename(pdf_path)}")
+                
+            except Exception as e:
+                error_files.append((pdf_path, str(e)))
+                print(f"✗ Error processing {os.path.basename(pdf_path)}: {e}")
+        
+        progress.setValue(len(pdf_files))
+        
+        # Show summary
+        msg = f"Batch processing complete!\n\n✓ Success: {success_count} files"
+        if error_files:
+            msg += f"\n✗ Errors: {len(error_files)} files\n"
+            for path, err in error_files[:3]:
+                msg += f"\n  • {os.path.basename(path)}: {err[:50]}"
+            if len(error_files) > 3:
+                msg += f"\n  ... and {len(error_files) - 3} more errors"
+        
+        QMessageBox.information(self, "Batch Complete", msg)
+    
+    def _batch_process_pdfs_matched(self, matched_pairs):
+        """Internal method to process PDFs with their matched templates."""
+        progress = QtWidgets.QProgressDialog(
+            "Batch processing...", "Cancel", 0, len(matched_pairs), self
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        
+        success_count = 0
+        error_files = []
+        
+        for idx, (pdf_path, template_path) in enumerate(matched_pairs):
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                break
+            
+            progress.setValue(idx)
+            progress.setLabelText(f"Processing: {os.path.basename(pdf_path)}")
+            
+            try:
+                # Load template for this PDF
+                with open(template_path, 'r') as f:
+                    template_data = json.load(f)
+                self._load_template_data(template_data)
+                
+                # Load PDF
+                self.pdf_path = pdf_path
+                self.pdf_document = fitz.open(pdf_path)
+                self.current_page = 0
+                self.align_reference_gray = None
+                self.load_page(0)
+                
+                # Reset alignment template for new PDF
+                self.align_template = None
+                self.align_template_pos = None
+                self.align_template_size = None
+                
+                # Run recognition
+                self._run_recognition_internal()
+                
+                # Export results to same folder as PDF
+                output_folder = os.path.dirname(pdf_path)
+                pdf_basename = os.path.splitext(os.path.basename(pdf_path))[0]
+                timestamp = self._get_timestamp()
+                
+                # Export Excel
+                excel_path = os.path.join(output_folder, f"{pdf_basename}_{timestamp}.xlsx")
+                self._export_excel_internal(excel_path)
+                
+                # Export Images
+                img_folder = os.path.join(output_folder, f"{pdf_basename}_{timestamp}")
+                self._export_images_internal(img_folder)
+                
+                success_count += 1
+                print(f"✓ Processed: {os.path.basename(pdf_path)}")
+                
+            except Exception as e:
+                error_files.append((pdf_path, str(e)))
+                print(f"✗ Error processing {os.path.basename(pdf_path)}: {e}")
+        
+        progress.setValue(len(matched_pairs))
+        
+        # Show summary
+        msg = f"Batch processing complete!\n\n✓ Success: {success_count} files"
+        if error_files:
+            msg += f"\n✗ Errors: {len(error_files)} files\n"
+            for path, err in error_files[:3]:
+                msg += f"\n  • {os.path.basename(path)}: {err[:50]}"
+            if len(error_files) > 3:
+                msg += f"\n  ... and {len(error_files) - 3} more errors"
+        
+        QMessageBox.information(self, "Batch Complete", msg)
+    
+    def _load_template_data(self, data):
+        """Internal method to load template data without file dialog."""
+        self.clear_all_marks()
+        
+        for m in data.get("text_marks", []):
+            item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_TEXT, m['question'], m['label'], view_ref=self.view)
+            item.setPos(m['x'], m['y'])
+            self.view.text_marks.append(item)
+            self.scene.addItem(item)
+            self.view.text_counter = max(self.view.text_counter, m['question'] + 1)
+            
+        for m in data.get("option_marks", []):
+            item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_OPTION, m['question'], m['label'], m.get('options_count', 4), view_ref=self.view)
+            item.setPos(m['x'], m['y'])
+            self.view.option_marks.append(item)
+            self.scene.addItem(item)
+            self.view.option_counter = max(self.view.option_counter, m['question'] + 1)
+        
+        # Load alignment mark if exists
+        align_data = data.get("align_mark")
+        if align_data:
+            item = MarkItem(0, 0, align_data['width'], align_data['height'], MARK_TYPE_ALIGN, 
+                           align_data.get('question', 1), align_data.get('label', ''), view_ref=self.view)
+            item.setPos(align_data['x'], align_data['y'])
+            self.view.align_mark = item
+            self.scene.addItem(item)
+    
+    def _run_recognition_internal(self):
+        """Internal recognition method without UI dialogs."""
+        if not self.pdf_document or (not self.view.option_marks and not self.view.text_marks):
+            return
+        
+        self.results = {}
+        
+        # Save current page's image offset before processing
+        if self.current_pixmap_item:
+            self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
+        
+        # Reset alignment template for new recognition run
+        self.align_template = None
+        self.align_template_pos = None
+        self.align_template_size = None
+        self.align_reference_gray = None
+        self.align_reference_bounds = None
+        
+        for p_idx in range(len(self.pdf_document)):
+            QtWidgets.QApplication.processEvents()
+            
+            page = self.pdf_document[p_idx]
+            mat = fitz.Matrix(2, 2)
+            pix = page.get_pixmap(matrix=mat)
+
+            img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img_np = np.array(img_pil)
+
+            # Apply auto-deskew if enabled
+            if self.check_auto_deskew.isChecked():
+                img_np, skew = deskew_image(img_np)
+
+            # Apply auto-align (shift) if enabled
+            if self.check_auto_align.isChecked():
+                img_np, (dx, dy), response = self.align_image(img_np, p_idx)
+
+            h, w = img_np.shape[:2]
+            off_x, off_y = self.page_offsets.get(p_idx, (0, 0))
+
+            page_result = {"text": {}, "options": {}}
+
+            # Process text marks
+            for mark in self.view.text_marks:
+                rect = mark.sceneBoundingRect()
+                x1 = max(0, int(rect.x() - off_x))
+                y1 = max(0, int(rect.y() - off_y))
+                x2 = min(w, int(rect.x() + rect.width() - off_x))
+                y2 = min(h, int(rect.y() + rect.height() - off_y))
+                
+                if x2 > x1 and y2 > y1:
+                    crop = img_np[y1:y2, x1:x2]
+                    crop_pil = Image.fromarray(crop)
+                    text = self.recognize_text(crop_pil)
+                    page_result["text"][mark.label or f"Field_{mark.question_num}"] = text
+
+            # Process option marks
+            for mark in self.view.option_marks:
+                rect = mark.sceneBoundingRect()
+                x1 = max(0, int(rect.x() - off_x))
+                y1 = max(0, int(rect.y() - off_y))
+                x2 = min(w, int(rect.x() + rect.width() - off_x))
+                y2 = min(h, int(rect.y() + rect.height() - off_y))
+                
+                if x2 > x1 and y2 > y1:
+                    crop = img_np[y1:y2, x1:x2]
+                    crop_pil = Image.fromarray(crop)
+                    opt = mark.options_count
+                    result_opt = self.detect_filled_option(crop_pil, opt)
+                    page_result["options"][mark.question_num] = result_opt
+
+            self.results[p_idx] = page_result
+    
+    def _export_excel_internal(self, output_path):
+        """Internal method to export Excel without file dialog."""
+        if not hasattr(self, 'results'):
+            return
+        
+        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        
+        yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+        green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
+        header_font = Font(bold=True)
+        center_align = Alignment(horizontal='center')
+        
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "OMR Results"
+        
+        all_qs = set()
+        all_texts = set()
+        
+        for p_res in self.results.values():
+            all_qs.update(p_res.get("options", {}).keys())
+            all_texts.update(p_res.get("text", {}).keys())
+            
+        sorted_qs = sorted(list(all_qs))
+        sorted_texts = sorted(list(all_texts))
+        
+        text_start_col = 2
+        q_start_col = text_start_col + len(sorted_texts)
+        score_col = q_start_col + len(sorted_qs)
+        
+        headers = ["Page"] + sorted_texts + [f"Q{q}" for q in sorted_qs] + ["Score"]
+        ws.append(headers)
+        
+        key_row = ["Key"] + [""] * len(sorted_texts)
+        for q in sorted_qs:
+            key_row.append(self.answer_key.get(q, ""))
+        key_row.append("")
+        ws.append(key_row)
+        
+        data_row_num = 3
+        first_data_row = 3
+        empty_cells = []
+        multiple_cells = []
+        
+        for p_idx, res in self.results.items():
+            if self.first_page_key and p_idx == 0:
+                continue
+            
+            row = [p_idx + 1]
+            texts = res.get("text", {})
+            for t_key in sorted_texts:
+                row.append(texts.get(t_key, ""))
+                
+            opts = res.get("options", {})
+            for q_idx, q in enumerate(sorted_qs):
+                val = opts.get(q, "")
+                row.append(val)
+                col_letter = get_column_letter(q_start_col + q_idx)
+                if val == "" or val is None:
+                    empty_cells.append(f"{col_letter}{data_row_num}")
+                elif len(str(val)) > 1:
+                    multiple_cells.append(f"{col_letter}{data_row_num}")
+            
+            if sorted_qs:
+                first_q_col = get_column_letter(q_start_col)
+                last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
+                score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
+                row.append(score_formula)
+            else:
+                row.append(0)
+            
+            ws.append(row)
+            data_row_num += 1
+        
+        last_data_row = data_row_num - 1
+        
+        for cell_ref in empty_cells:
+            ws[cell_ref].fill = yellow_fill
+        for cell_ref in multiple_cells:
+            ws[cell_ref].fill = orange_fill
+        
+        if sorted_qs and last_data_row >= first_data_row:
+            stats_row_num = data_row_num + 1
+            ws.cell(row=stats_row_num, column=1, value="% Correct").fill = green_fill
+            ws.cell(row=stats_row_num, column=1).font = header_font
+            
+            for q_idx, q in enumerate(sorted_qs):
+                col_num = q_start_col + q_idx
+                col_letter = get_column_letter(col_num)
+                data_range = f"{col_letter}{first_data_row}:{col_letter}{last_data_row}"
+                key_cell = f"{col_letter}$2"
+                percent_formula = f'=IF(COUNTA({data_range})>0, COUNTIF({data_range},{key_cell})/COUNTA({data_range})*100, 0)'
+                cell = ws.cell(row=stats_row_num, column=col_num, value=percent_formula)
+                cell.fill = green_fill
+                cell.alignment = center_align
+                cell.number_format = '0.0"%"'
+            
+            if sorted_qs:
+                first_q_col = get_column_letter(q_start_col)
+                last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
+                avg_formula = f'=AVERAGE({first_q_col}{stats_row_num}:{last_q_col}{stats_row_num})'
+                cell = ws.cell(row=stats_row_num, column=score_col, value=avg_formula)
+                cell.fill = green_fill
+                cell.alignment = center_align
+                cell.number_format = '0.0"%"'
+        
+        for col in range(1, len(headers) + 1):
+            ws.cell(row=1, column=col).font = header_font
+            ws.cell(row=1, column=col).alignment = center_align
+            
+        wb.save(output_path)
+        print(f"  Excel saved: {output_path}")
+    
+    def _export_images_internal(self, output_folder):
+        """Internal method to export images without file dialog."""
+        if not hasattr(self, 'pdf_document') or self.pdf_document is None:
+            return
+        if not hasattr(self, 'view') or not self.view.option_marks:
+            return
+        
+        os.makedirs(output_folder, exist_ok=True)
+        
+        # Reset alignment template for export
+        self.align_template = None
+        self.align_template_pos = None
+        self.align_template_size = None
+        self.align_reference_gray = None
+        self.align_reference_bounds = None
+        
+        for page_idx in range(len(self.pdf_document)):
+            QtWidgets.QApplication.processEvents()
+            
+            page = self.pdf_document[page_idx]
+            mat = fitz.Matrix(2, 2)
+            pix = page.get_pixmap(matrix=mat)
+
+            img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img_np = np.array(img_pil)
+
+            if self.check_auto_deskew.isChecked():
+                img_np, skew_angle = deskew_image(img_np)
+
+            if self.check_auto_align.isChecked():
+                img_np, (dx, dy), response = self.align_image(img_np, page_idx)
+
+            h, w = img_np.shape[:2]
+            qimg = QImage(img_np.data, w, h, img_np.strides[0], QImage.Format_RGB888).copy()
+            
+            painter = QPainter(qimg)
+            painter.setRenderHint(QPainter.Antialiasing)
+            
+            page_results = self.results.get(page_idx, {}) if hasattr(self, 'results') else {}
+            opts = page_results.get("options", {})
+            off_x, off_y = self.page_offsets.get(page_idx, (0, 0))
+            
+            for mark in self.view.option_marks:
+                rect = mark.sceneBoundingRect()
+                q_num = mark.question_num
+                
+                if rect:
+                    x = int(rect.x() - off_x)
+                    y = int(rect.y() - off_y)
+                    mw = int(rect.width())
+                    mh = int(rect.height())
+                    
+                    painter.setPen(QPen(QColor(0, 100, 255), 2))
+                    painter.drawRect(x, y, mw, mh)
+                    
+                    q_num_int = int(q_num) if isinstance(q_num, (int, str)) and str(q_num).isdigit() else q_num
+                    student_answer = opts.get(q_num_int, "") or opts.get(q_num, "") or opts.get(str(q_num), "")
+                    correct_answer = self.answer_key.get(q_num_int, "") or self.answer_key.get(q_num, "") or self.answer_key.get(str(q_num), "")
+                    
+                    num_options = getattr(mark, "options_count", 4)
+                    cell_width = mw // num_options
+                    option_labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:num_options]
+                    
+                    for i, opt_label in enumerate(option_labels):
+                        cell_x = x + i * cell_width
+                        cell_center_x = cell_x + cell_width // 2
+                        cell_center_y = y + mh // 2
+                        
+                        if correct_answer and opt_label.upper() == correct_answer.upper():
+                            painter.save()
+                            painter.setBrush(QBrush(QColor(255, 0, 0)))
+                            painter.setPen(QPen(QColor(255, 0, 0), 2))
+                            painter.drawEllipse(cell_center_x - 8, cell_center_y - 8, 16, 16)
+                            painter.restore()
+                        
+                        if student_answer and opt_label.upper() == student_answer.upper():
+                            if correct_answer and student_answer.upper() != correct_answer.upper():
+                                painter.save()
+                                painter.setPen(QPen(QColor(255, 0, 0), 3))
+                                painter.drawLine(cell_center_x - 8, cell_center_y - 8, cell_center_x + 8, cell_center_y + 8)
+                                painter.drawLine(cell_center_x + 8, cell_center_y - 8, cell_center_x - 8, cell_center_y + 8)
+                                painter.restore()
+                    
+                    painter.setPen(QPen(QColor(0, 0, 0), 1))
+                    painter.setFont(QFont("Arial", 10, QFont.Bold))
+                    painter.drawText(x - 30, y + mh // 2 + 5, f"Q{q_num}")
+            
+            painter.end()
+            
+            output_path = os.path.join(output_folder, f"page_{page_idx + 1:03d}.png")
+            qimg.save(output_path)
+        
+        print(f"  Images saved: {output_folder}")
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
