@@ -1,4 +1,4 @@
-"""Entry point for the MC Marking desktop application."""
+"""Entry point for the CheckMate desktop application."""
 
 import sys
 

@@ -28,17 +28,19 @@ from PyQt5.QtWidgets import (
     QDialog, QComboBox, QCheckBox, QTextEdit, QGraphicsRectItem,
     QSpinBox, QGroupBox, QTableWidget, QTableWidgetItem, QSplitter,
     QMessageBox, QInputDialog, QScrollArea, QFrame, QSlider,
-    QGraphicsPixmapItem, QMenu, QAction
+    QGraphicsPixmapItem, QMenu, QAction, QDialogButtonBox
 )
-from PyQt5.QtGui import QPixmap, QImage, QPen, QBrush, QColor, QPainter, QFont, QWheelEvent, QCursor
-from PyQt5.QtCore import Qt, QRectF, QPointF
+from PyQt5.QtGui import QPixmap, QImage, QPen, QBrush, QColor, QPainter, QFont, QWheelEvent, QCursor, QDesktopServices
+from PyQt5.QtCore import Qt, QRectF, QPointF, QUrl
 import fitz  # PyMuPDF for PDF rendering
 import sys
 import json
 import os
+import re
 import io
 import cv2
 import numpy as np
+import statistics
 from PIL import Image
 from openpyxl import Workbook
 from openpyxl.styles import Font as XLFont, Alignment, Border, Side
@@ -702,6 +704,7 @@ class OMRSoftware(QMainWindow):
         self.first_page_key = False
         self.align_reference_gray = None
         self.align_reference_size = None
+        self.topic_map = {}
         
         self.init_ui()
         
@@ -1236,9 +1239,12 @@ class OMRSoftware(QMainWindow):
         filled_options = []
         
         if cell_scores:
-            max_combined = max(s['combined'] for s in cell_scores)
-            min_combined = min(s['combined'] for s in cell_scores)
+            combined_vals = [s['combined'] for s in cell_scores]
+            max_combined = max(combined_vals)
+            min_combined = min(combined_vals)
             score_range = max_combined - min_combined
+            mean_combined = sum(combined_vals) / max(1, len(combined_vals))
+            std_combined = (sum((v - mean_combined) ** 2 for v in combined_vals) / max(1, len(combined_vals))) ** 0.5
             
             # Get the max darkness score (actual gray difference from overall mean)
             max_darkness = max(s['darkness'] for s in cell_scores)
@@ -1270,42 +1276,25 @@ class OMRSoftware(QMainWindow):
             
             if is_clearly_blank:
                 print(f"  No option filled: clearly blank (range={score_range:.1f}, max={max_combined:.1f})")
-            elif score_range >= MIN_SCORE_RANGE:
-                # Good score range means one option stands out - use relative threshold
-                # The filled option should be significantly higher than others
-                
-                # Calculate threshold: top 30% of the score range
-                threshold = max_combined - score_range * 0.3
-                
-                # Also ensure minimum absolute scores
-                for score in cell_scores:
-                    if (score['combined'] >= threshold and 
-                        score['combined'] >= MIN_COMBINED_THRESHOLD and
-                        score['darkness'] >= MIN_DARKNESS_THRESHOLD):
-                        filled_options.append(score['option'])
-                
-                if filled_options:
-                    print(f"  Threshold: {threshold:.1f} (range-based detection)")
-                else:
-                    print(f"  No option filled: scores below minimum (threshold={threshold:.1f}, min_comb={MIN_COMBINED_THRESHOLD})")
-            elif max_combined >= MIN_COMBINED_THRESHOLD * 1.5 and max_darkness >= MIN_DARKNESS_THRESHOLD * 1.5:
-                # Smaller range but high absolute scores - still might be a mark
-                threshold = max_combined - score_range * 0.4
-                
-                for score in cell_scores:
-                    if (score['combined'] >= threshold and 
-                        score['combined'] >= MIN_COMBINED_THRESHOLD and
-                        score['darkness'] >= MIN_DARKNESS_THRESHOLD):
-                        filled_options.append(score['option'])
-                
-                if filled_options:
-                    print(f"  Threshold: {threshold:.1f} (absolute-score detection)")
-                else:
-                    print(f"  No option filled: range too small (range={score_range:.1f})")
             else:
-                print(f"  No option filled: scores too low (max_comb={max_combined:.1f}, max_dark={max_darkness:.1f}, range={score_range:.1f})")
+                # Multi-select friendly: any option above minimum thresholds is counted
+                for score in cell_scores:
+                    if (score['combined'] >= MIN_COMBINED_THRESHOLD and
+                        score['darkness'] >= MIN_DARKNESS_THRESHOLD):
+                        filled_options.append(score['option'])
+                if filled_options:
+                    print(f"  Selected by minimum thresholds (min_comb={MIN_COMBINED_THRESHOLD}, min_dark={MIN_DARKNESS_THRESHOLD})")
+                else:
+                    print(f"  No option filled: scores below minimum (min_comb={MIN_COMBINED_THRESHOLD}, min_dark={MIN_DARKNESS_THRESHOLD})")
         
-        result = "".join(filled_options)
+        # Remove duplicates while preserving order (avoid outputs like CDCD)
+        seen = set()
+        unique_options = []
+        for opt in filled_options:
+            if opt not in seen:
+                unique_options.append(opt)
+                seen.add(opt)
+        result = "".join(unique_options)
         print(f"  Detected filled option(s): {result if result else '(none)'}")
         return result
 
@@ -1439,7 +1428,7 @@ class OMRSoftware(QMainWindow):
         return "OCR Error: No Engine"
 
     def init_ui(self):
-        self.setWindowTitle("OMR Marking Software - Modern Edition")
+        self.setWindowTitle("CheckMate – The definitive OMR software")
         self.setGeometry(100, 100, 1400, 850)
         
         central = QWidget()
@@ -1457,7 +1446,7 @@ class OMRSoftware(QMainWindow):
         left_layout.setSpacing(15)
         
         # Title
-        title = QLabel("OMR Master")
+        title = QLabel("CheckMate")
         title.setObjectName("titleLabel")
         left_layout.addWidget(title)
         
@@ -1548,6 +1537,18 @@ class OMRSoftware(QMainWindow):
         btn_export = QPushButton("Export to Excel")
         btn_export.clicked.connect(self.export_excel)
         p_layout.addWidget(btn_export)
+
+        self.check_include_summary = QCheckBox("Include summary analysis in Excel")
+        self.check_include_summary.setChecked(True)
+        p_layout.addWidget(self.check_include_summary)
+
+        self.check_include_topics = QCheckBox("Include topic sheet/analysis in Excel")
+        self.check_include_topics.setChecked(True)
+        p_layout.addWidget(self.check_include_topics)
+
+        btn_topics = QPushButton("Set Topics")
+        btn_topics.clicked.connect(self.edit_topics)
+        p_layout.addWidget(btn_topics)
         
         btn_export_img = QPushButton("Export Images with Answers")
         btn_export_img.clicked.connect(self.export_images)
@@ -1640,10 +1641,13 @@ class OMRSoftware(QMainWindow):
         right_layout.addWidget(QLabel("<b>Results & Answer Key</b>"))
         
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Q", "Detected", "Correct", "Points"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Q", "Detected", "Correct", "Points", "Crop"])
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.table.cellChanged.connect(self.on_table_edit)
+        self.table.cellClicked.connect(self.open_crop_from_table)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.open_crop_context_menu)
         right_layout.addWidget(self.table)
         
         self.lbl_score = QLabel("Total: 0")
@@ -1696,6 +1700,73 @@ class OMRSoftware(QMainWindow):
     def _get_timestamp(self):
         return QtCore.QDateTime.currentDateTime().toString("yyyyMMdd_HHmmss")
 
+    def _safe_crop_label(self, label):
+        label = str(label) if label is not None else ""
+        label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_")
+        return label or "item"
+
+    def _save_crop_image(self, image, page_idx, label, kind):
+        """Save a crop image and return the file path."""
+        debug_dir = "debug_crops"
+        os.makedirs(debug_dir, exist_ok=True)
+        safe_label = self._safe_crop_label(label)
+        filename = f"page_{page_idx+1}_{kind}_{safe_label}.png"
+        path = os.path.join(debug_dir, filename)
+        image.save(path)
+        return path
+
+    def _get_all_questions(self):
+        questions = set()
+        if hasattr(self, "view") and getattr(self.view, "option_marks", None):
+            for mark in self.view.option_marks:
+                questions.add(mark.question_num)
+        if hasattr(self, "results"):
+            for res in self.results.values():
+                questions.update(res.get("options", {}).keys())
+        return sorted(questions)
+
+    def edit_topics(self):
+        questions = self._get_all_questions()
+        if not questions:
+            QMessageBox.information(self, "Topics", "No questions found to label.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Set Topics")
+        dialog.resize(400, 500)
+        layout = QVBoxLayout(dialog)
+
+        table = QTableWidget()
+        table.setColumnCount(2)
+        table.setHorizontalHeaderLabels(["Question", "Topic"])
+        table.setRowCount(len(questions))
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+
+        for row, q in enumerate(questions):
+            q_item = QTableWidgetItem(f"Q{q}")
+            q_item.setFlags(Qt.ItemIsEnabled)
+            table.setItem(row, 0, q_item)
+            topic_val = self.topic_map.get(q, "")
+            table.setItem(row, 1, QTableWidgetItem(topic_val))
+
+        layout.addWidget(table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        def accept():
+            new_map = {}
+            for row, q in enumerate(questions):
+                topic_text = table.item(row, 1).text() if table.item(row, 1) else ""
+                new_map[q] = topic_text.strip()
+            self.topic_map = new_map
+            dialog.accept()
+
+        buttons.accepted.connect(accept)
+        buttons.rejected.connect(dialog.reject)
+
+        dialog.exec_()
+
     def load_page(self, p_idx, apply_corrections=True):
         if not self.pdf_document: return
         
@@ -1723,7 +1794,7 @@ class OMRSoftware(QMainWindow):
             if hasattr(self, 'check_auto_deskew') and self.check_auto_deskew.isChecked():
                 img_np, skew_angle = deskew_image(img_np)
                 if skew_angle != 0.0:
-                    correction_info.append(f"傾斜校正: {skew_angle:.2f}°")
+                    correction_info.append(f"Deskew: {skew_angle:.2f}°")
             
             # Apply auto-align (shift) if enabled and alignment mark exists
             if hasattr(self, 'check_auto_align') and self.check_auto_align.isChecked():
@@ -1731,9 +1802,9 @@ class OMRSoftware(QMainWindow):
                     # Page 0 initializes the template, other pages get aligned
                     img_np, (dx, dy), confidence = self.align_image(img_np, p_idx)
                     if p_idx == 0:
-                        correction_info.append("對齊參考已設定")
+                        correction_info.append("Alignment reference set")
                     elif dx != 0.0 or dy != 0.0:
-                        correction_info.append(f"位移校正: dx={dx:.1f}, dy={dy:.1f}")
+                        correction_info.append(f"Shift correction: dx={dx:.1f}, dy={dy:.1f}")
         
         # Convert back to QImage
         h, w = img_np.shape[:2]
@@ -1947,7 +2018,9 @@ class OMRSoftware(QMainWindow):
             
             page_res = {
                 "options": {},
-                "text": {}
+                "text": {},
+                "option_crops": {},
+                "text_crops": {}
             }
             
             # Helper to process a list of marks
@@ -1972,6 +2045,8 @@ class OMRSoftware(QMainWindow):
                     
                     if right > left and bottom > top:
                         crop = img_pil.crop((left, top, right, bottom))
+                        crop_label = f"Q{mark.question_num}" if mark.mark_type == MARK_TYPE_OPTION else (mark.label or f"Field_{mark.question_num}")
+                        crop_path = self._save_crop_image(crop, p_idx, crop_label, "option" if mark.mark_type == MARK_TYPE_OPTION else "text")
                         
                         if mark.mark_type == MARK_TYPE_OPTION:
                             # Use bubble detection for options
@@ -1982,13 +2057,16 @@ class OMRSoftware(QMainWindow):
                     else:
                         text = f"[Out of bounds]"
                         print(f"  Out of bounds!")
+                        crop_path = ""
                     
                     if mark.mark_type == MARK_TYPE_OPTION:
                         target_dict[mark.question_num] = text
+                        page_res["option_crops"][mark.question_num] = crop_path
                     else:
                         # For text fields, use label as key if exists, else "Field X"
                         key = mark.label if mark.label else f"Field {mark.question_num}"
                         target_dict[key] = text
+                        page_res["text_crops"][key] = crop_path
             
             process_marks(self.view.option_marks, page_res["options"])
             process_marks(self.view.text_marks, page_res["text"])
@@ -2018,12 +2096,15 @@ class OMRSoftware(QMainWindow):
         # Display results for CURRENT page
         if self.current_page not in getattr(self, 'results', {}):
             return
-            
+        
+        self.table.blockSignals(True)
         page_res = self.results[self.current_page]
         # structure: {"options": {1: "A", ...}, "text": {"Name": "John", ...}}
         
         opts = page_res.get("options", {})
         texts = page_res.get("text", {})
+        option_crops = page_res.get("option_crops", {})
+        text_crops = page_res.get("text_crops", {})
         
         self.table.setRowCount(len(texts) + len(opts))
         
@@ -2035,6 +2116,11 @@ class OMRSoftware(QMainWindow):
             self.table.setItem(current_row, 1, QTableWidgetItem(str(val)))
             self.table.setItem(current_row, 2, QTableWidgetItem("-")) # No correct answer for info
             self.table.setItem(current_row, 3, QTableWidgetItem("-")) # No points
+            crop_item = QTableWidgetItem("Open") if text_crops.get(key) else QTableWidgetItem("-")
+            crop_item.setFlags(Qt.ItemIsEnabled)
+            crop_item.setForeground(QColor("#007bff"))
+            crop_item.setData(Qt.UserRole, text_crops.get(key, ""))
+            self.table.setItem(current_row, 4, crop_item)
             
             # Grey out key/points
             self.table.item(current_row, 2).setFlags(Qt.ItemIsEnabled)
@@ -2064,18 +2150,44 @@ class OMRSoftware(QMainWindow):
             self.table.setItem(current_row, 1, QTableWidgetItem(str(detected)))
             self.table.setItem(current_row, 2, QTableWidgetItem(str(correct)))
             self.table.setItem(current_row, 3, QTableWidgetItem(str(points)))
+            crop_item = QTableWidgetItem("Open") if option_crops.get(q_num) else QTableWidgetItem("-")
+            crop_item.setFlags(Qt.ItemIsEnabled)
+            crop_item.setForeground(QColor("#007bff"))
+            crop_item.setData(Qt.UserRole, option_crops.get(q_num, ""))
+            self.table.setItem(current_row, 4, crop_item)
             
-            # Color code
-            if correct:
+            # Color code similar to Excel: empty, multiple, correct/incorrect
+            detected_str = str(detected).strip()
+            if detected_str == "":
+                self.table.item(current_row, 1).setBackground(QColor("#fff3cd"))
+            elif len(detected_str) > 1:
+                self.table.item(current_row, 1).setBackground(QColor("#ffe5b4"))
+            elif correct:
                 color = QColor("#d4edda") if is_correct else QColor("#f8d7da")
                 self.table.item(current_row, 1).setBackground(color)
             
             current_row += 1
         
         self.lbl_score.setText(f"Page Score: {total_score}")
+        self.table.blockSignals(False)
 
     def on_table_edit(self, row, col):
-        if col == 2: # Correct Answer column
+        if col == 1:
+            item_header = self.table.item(row, 0).text()
+            new_val = self.table.item(row, 1).text()
+            if item_header.startswith("Q"):
+                try:
+                    q_txt = item_header.replace("Q", "")
+                    q_num = int(q_txt)
+                    if self.current_page in self.results:
+                        self.results[self.current_page]["options"][q_num] = new_val
+                except:
+                    pass
+            else:
+                if self.current_page in self.results:
+                    self.results[self.current_page]["text"][item_header] = new_val
+            self.update_result_table()
+        elif col == 2: # Correct Answer column
             item_header = self.table.item(row, 0).text()
             if item_header.startswith("Q"):
                 try:
@@ -2083,13 +2195,51 @@ class OMRSoftware(QMainWindow):
                     q_num = int(q_txt)
                     new_ans = self.table.item(row, 2).text()
                     self.answer_key[q_num] = new_ans
-                    # For immediate feedback we could call update_result_table(),
-                    # but be careful of infinite recursion if we were generating signals.
-                    # Since we are reacting to user edit, it's fine.
-                except: pass
+                    self.update_result_table()
+                except:
+                    pass
             else:
                 # Text field, reset if user tries to edit key
                 self.table.item(row, 2).setText("-")
+
+    def open_crop_from_table(self, row, col):
+        if col != 4:
+            return
+        item = self.table.item(row, col)
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        if path and os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def open_crop_context_menu(self, pos):
+        index = self.table.indexAt(pos)
+        if not index.isValid() or index.column() != 4:
+            return
+        item = self.table.item(index.row(), index.column())
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        if not path or not os.path.exists(path):
+            return
+
+        menu = QMenu(self)
+        action_save = QAction("Save Crop As...", self)
+        menu.addAction(action_save)
+
+        def do_save():
+            default_name = os.path.basename(path)
+            fname, _ = QFileDialog.getSaveFileName(self, "Save Crop Image", default_name, "PNG Image (*.png)")
+            if not fname:
+                return
+            try:
+                with open(path, "rb") as src, open(fname, "wb") as dst:
+                    dst.write(src.read())
+            except Exception as e:
+                QMessageBox.warning(self, "Save Failed", str(e))
+
+        action_save.triggered.connect(do_save)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def export_excel(self):
         if not hasattr(self, 'results'): return
@@ -2098,6 +2248,9 @@ class OMRSoftware(QMainWindow):
         default_name = f"{prefix}_{timestamp}.xlsx"
         fname, _ = QFileDialog.getSaveFileName(self, "Export Excel", default_name, "Excel (*.xlsx)")
         if not fname: return
+
+        include_summary = self.check_include_summary.isChecked() if hasattr(self, "check_include_summary") else True
+        include_topics = self.check_include_topics.isChecked() if hasattr(self, "check_include_topics") else True
 
         # Ensure filename includes prefix and timestamp
         base_dir = os.path.dirname(fname)
@@ -2156,6 +2309,10 @@ class OMRSoftware(QMainWindow):
         first_data_row = 3
         empty_cells = []  # Track cells with empty answers for highlighting
         multiple_cells = []  # Track cells with multiple selections for highlighting
+        page_scores = []
+        page_totals = []
+        page_blank_counts = []
+        page_multi_counts = []
         
         for p_idx, res in self.results.items():
             if self.first_page_key and p_idx == 0: continue
@@ -2169,6 +2326,10 @@ class OMRSoftware(QMainWindow):
                 
             # Questions - track empty answers and multiple selections
             opts = res.get("options", {})
+            page_blank = 0
+            page_multi = 0
+            page_score = 0
+            page_total = 0
             for q_idx, q in enumerate(sorted_qs):
                 val = opts.get(q, "")
                 row.append(val)
@@ -2176,9 +2337,16 @@ class OMRSoftware(QMainWindow):
                 # Track empty answers for highlighting
                 if val == "" or val is None:
                     empty_cells.append(f"{col_letter}{data_row_num}")
+                    page_blank += 1
                 # Track multiple selections (e.g., "AB", "BC") for highlighting
                 elif len(str(val)) > 1:
                     multiple_cells.append(f"{col_letter}{data_row_num}")
+                    page_multi += 1
+                correct_val = self.answer_key.get(q, "")
+                if correct_val != "":
+                    page_total += 1
+                    if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
+                        page_score += 1
             
             # Score formula using SUMPRODUCT to compare each answer with key row
             # Formula: =SUMPRODUCT((C3:Z3=C$2:Z$2)*1) where C:Z are question columns
@@ -2191,6 +2359,10 @@ class OMRSoftware(QMainWindow):
                 row.append(0)
             
             ws.append(row)
+            page_scores.append(page_score)
+            page_totals.append(page_total)
+            page_blank_counts.append(page_blank)
+            page_multi_counts.append(page_multi)
             data_row_num += 1
         
         last_data_row = data_row_num - 1
@@ -2244,6 +2416,72 @@ class OMRSoftware(QMainWindow):
         for col in range(1, len(headers) + 1):
             ws.cell(row=1, column=col).font = header_font
             ws.cell(row=1, column=col).alignment = center_align
+
+        # Summary analysis sheet
+        if include_summary:
+            summary = wb.create_sheet("Summary")
+            summary.append(["Metric", "Value"])
+            summary.cell(row=1, column=1).font = header_font
+            summary.cell(row=1, column=2).font = header_font
+
+            total_pages = len(page_scores)
+            total_questions = max(page_totals) if page_totals else 0
+            avg_score = statistics.mean(page_scores) if page_scores else 0
+            median_score = statistics.median(page_scores) if page_scores else 0
+            max_score = max(page_scores) if page_scores else 0
+            min_score = min(page_scores) if page_scores else 0
+            stdev_score = statistics.pstdev(page_scores) if len(page_scores) > 1 else 0
+            avg_blank = statistics.mean(page_blank_counts) if page_blank_counts else 0
+            avg_multi = statistics.mean(page_multi_counts) if page_multi_counts else 0
+
+            summary.append(["Total Pages", total_pages])
+            summary.append(["Total Questions", total_questions])
+            summary.append(["Average Score", avg_score])
+            summary.append(["Median Score", median_score])
+            summary.append(["Max Score", max_score])
+            summary.append(["Min Score", min_score])
+            summary.append(["Score Std Dev", stdev_score])
+            summary.append(["Avg Blank Answers", avg_blank])
+            summary.append(["Avg Multiple Answers", avg_multi])
+
+        # Topics sheet (user-editable)
+        if include_topics:
+            topics_sheet = wb.create_sheet("Topics")
+            topics_sheet.append(["Question", "Topic"])
+            topics_sheet.cell(row=1, column=1).font = header_font
+            topics_sheet.cell(row=1, column=2).font = header_font
+            for q in sorted_qs:
+                topics_sheet.append([f"Q{q}", self.topic_map.get(q, "")])
+
+            # Topic analysis sheet based on current topic map
+            topic_groups = {}
+            for q in sorted_qs:
+                topic = self.topic_map.get(q, "").strip() or "Unassigned"
+                topic_groups.setdefault(topic, []).append(q)
+
+            analysis = wb.create_sheet("Topic Analysis")
+            analysis.append(["Topic", "Questions", "Avg Score", "Avg %"])
+            for col in range(1, 5):
+                analysis.cell(row=1, column=col).font = header_font
+
+            pages_count = len(page_scores)
+            for topic, qs in topic_groups.items():
+                total_items = max(1, len(qs) * max(1, pages_count))
+                correct_count = 0
+                for p_idx, res in self.results.items():
+                    if self.first_page_key and p_idx == 0:
+                        continue
+                    opts = res.get("options", {})
+                    for q in qs:
+                        correct_val = self.answer_key.get(q, "")
+                        if correct_val == "":
+                            continue
+                        val = opts.get(q, "")
+                        if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
+                            correct_count += 1
+                avg_score_topic = correct_count / max(1, pages_count)
+                avg_pct = correct_count / total_items * 100
+                analysis.append([topic, ", ".join([f"Q{q}" for q in qs]), avg_score_topic, avg_pct])
             
         wb.save(fname)
         
@@ -2318,8 +2556,8 @@ class OMRSoftware(QMainWindow):
                     print(f"Export page {page_idx + 1}: Aligned shift dx={dx:.1f}, dy={dy:.1f} (score={response:.3f})")
 
             # Convert to QImage for drawing
-            h, w = img_np.shape[:2]
-            qimg = QImage(img_np.data, w, h, img_np.strides[0], QImage.Format_RGB888).copy()
+            img_h, img_w = img_np.shape[:2]
+            qimg = QImage(img_np.data, img_w, img_h, img_np.strides[0], QImage.Format_RGB888).copy()
             
             # Create painter to draw overlay
             painter = QPainter(qimg)
@@ -2333,6 +2571,8 @@ class OMRSoftware(QMainWindow):
             off_x, off_y = self.page_offsets.get(page_idx, (0, 0))
             
             # Draw marks and answers
+            page_score = 0
+            page_total = 0
             for mark in self.view.option_marks:
                 rect = mark.sceneBoundingRect()
                 q_num = mark.question_num
@@ -2340,12 +2580,12 @@ class OMRSoftware(QMainWindow):
                 if rect:
                     x = int(rect.x() - off_x)
                     y = int(rect.y() - off_y)
-                    w = int(rect.width())
-                    h = int(rect.height())
+                    mw = int(rect.width())
+                    mh = int(rect.height())
                     
                     # Draw rectangle border
                     painter.setPen(QPen(QColor(0, 100, 255), 2))
-                    painter.drawRect(x, y, w, h)
+                    painter.drawRect(x, y, mw, mh)
                     
                     # Get student answer and correct answer
                     # Ensure q_num is int for consistent key lookup
@@ -2353,19 +2593,29 @@ class OMRSoftware(QMainWindow):
                     student_answer = opts.get(q_num_int, "") or opts.get(q_num, "") or opts.get(str(q_num), "")
                     correct_answer = self.answer_key.get(q_num_int, "") or self.answer_key.get(q_num, "") or self.answer_key.get(str(q_num), "")
                     
+                    student_clean = "".join(str(student_answer).split()).upper()
+                    correct_clean = "".join(str(correct_answer).split()).upper()
+                    is_blank = student_clean == ""
+                    is_multi = len(student_clean) > 1
+                    is_correct = bool(correct_clean) and student_clean == correct_clean
+                    if correct_clean:
+                        page_total += 1
+                        if is_correct:
+                            page_score += 1
+                    
                     # Debug print
                     if correct_answer:
                         print(f"Q{q_num}: correct={correct_answer}")
                     
                     # Calculate cell positions for A, B, C, D
                     num_options = getattr(mark, "options_count", 4)
-                    cell_width = w // num_options
+                    cell_width = mw // num_options
                     option_labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:num_options]
                     
                     for i, opt_label in enumerate(option_labels):
                         cell_x = x + i * cell_width
                         cell_center_x = cell_x + cell_width // 2
-                        cell_center_y = y + h // 2
+                        cell_center_y = y + mh // 2
                         
                         # Draw red dot for correct answer
                         if correct_answer and opt_label.upper() == correct_answer.upper():
@@ -2386,11 +2636,49 @@ class OMRSoftware(QMainWindow):
                                 painter.drawLine(cell_center_x + 8, cell_center_y - 8, cell_center_x - 8, cell_center_y + 8)
                                 painter.restore()
                     
+                    # Highlight blank vs multi-selection
+                    if is_blank:
+                        painter.save()
+                        painter.setPen(QPen(QColor(255, 193, 7), 3))
+                        painter.drawRect(x, y, mw, mh)
+                        painter.restore()
+                    elif is_multi:
+                        painter.save()
+                        painter.setPen(QPen(QColor(255, 140, 0), 3))
+                        painter.drawRect(x, y, mw, mh)
+                        painter.restore()
+                    
+                    # Draw per-question correctness marker on the right
+                    marker_x = x + mw + 8
+                    marker_y = y + mh // 2 + 5
+                    painter.save()
+                    painter.setFont(QFont("Arial", 11, QFont.Bold))
+                    if is_blank:
+                        painter.setPen(QPen(QColor(255, 193, 7), 2))
+                        painter.drawText(marker_x, marker_y, "Ø")
+                    elif is_multi:
+                        painter.setPen(QPen(QColor(255, 140, 0), 2))
+                        painter.drawText(marker_x, marker_y, "!")
+                    else:
+                        painter.setPen(QPen(QColor(40, 167, 69), 2) if is_correct else QPen(QColor(220, 53, 69), 2))
+                        painter.drawText(marker_x, marker_y, "✓" if is_correct else "✗")
+                    painter.restore()
+                    
                     # Draw question number
                     painter.setPen(QPen(QColor(0, 0, 0), 1))
                     painter.setFont(QFont("Arial", 10, QFont.Bold))
-                    painter.drawText(x - 30, y + h // 2 + 5, f"Q{q_num}")
+                    painter.drawText(x - 30, y + mh // 2 + 5, f"Q{q_num}")
             
+            # Draw score at top-right (inside page bounds)
+            painter.save()
+            painter.setFont(QFont("Arial", 14, QFont.Bold))
+            painter.setPen(QPen(QColor(0, 0, 0), 2))
+            score_text = f"Score: {page_score}/{page_total}"
+            metrics = painter.fontMetrics()
+            text_width = metrics.horizontalAdvance(score_text)
+            x_pos = max(10, img_w - text_width - 10)
+            painter.drawText(x_pos, 30, score_text)
+            painter.restore()
             painter.end()
             
             # Save image
@@ -2529,6 +2817,10 @@ class OMRSoftware(QMainWindow):
                 
                 # Run recognition
                 self._run_recognition_internal()
+
+                # Use first page as answer key for this PDF (per-file)
+                if self.first_page_key and 0 in self.results:
+                    self.answer_key = self.results[0]["options"]
                 
                 # Export results to same folder as PDF
                 output_folder = os.path.dirname(pdf_path)
@@ -2603,6 +2895,10 @@ class OMRSoftware(QMainWindow):
                 
                 # Run recognition
                 self._run_recognition_internal()
+
+                # Use first page as answer key for this PDF (per-file)
+                if self.first_page_key and 0 in self.results:
+                    self.answer_key = self.results[0]["options"]
                 
                 # Export results to same folder as PDF
                 output_folder = os.path.dirname(pdf_path)
@@ -2740,6 +3036,9 @@ class OMRSoftware(QMainWindow):
         """Internal method to export Excel without file dialog."""
         if not hasattr(self, 'results'):
             return
+
+        include_summary = self.check_include_summary.isChecked() if hasattr(self, "check_include_summary") else True
+        include_topics = self.check_include_topics.isChecked() if hasattr(self, "check_include_topics") else True
         
         from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
@@ -2781,6 +3080,10 @@ class OMRSoftware(QMainWindow):
         first_data_row = 3
         empty_cells = []
         multiple_cells = []
+        page_scores = []
+        page_totals = []
+        page_blank_counts = []
+        page_multi_counts = []
         
         for p_idx, res in self.results.items():
             if self.first_page_key and p_idx == 0:
@@ -2792,14 +3095,25 @@ class OMRSoftware(QMainWindow):
                 row.append(texts.get(t_key, ""))
                 
             opts = res.get("options", {})
+            page_blank = 0
+            page_multi = 0
+            page_score = 0
+            page_total = 0
             for q_idx, q in enumerate(sorted_qs):
                 val = opts.get(q, "")
                 row.append(val)
                 col_letter = get_column_letter(q_start_col + q_idx)
                 if val == "" or val is None:
                     empty_cells.append(f"{col_letter}{data_row_num}")
+                    page_blank += 1
                 elif len(str(val)) > 1:
                     multiple_cells.append(f"{col_letter}{data_row_num}")
+                    page_multi += 1
+                correct_val = self.answer_key.get(q, "")
+                if correct_val != "":
+                    page_total += 1
+                    if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
+                        page_score += 1
             
             if sorted_qs:
                 first_q_col = get_column_letter(q_start_col)
@@ -2810,6 +3124,10 @@ class OMRSoftware(QMainWindow):
                 row.append(0)
             
             ws.append(row)
+            page_scores.append(page_score)
+            page_totals.append(page_total)
+            page_blank_counts.append(page_blank)
+            page_multi_counts.append(page_multi)
             data_row_num += 1
         
         last_data_row = data_row_num - 1
@@ -2847,6 +3165,69 @@ class OMRSoftware(QMainWindow):
         for col in range(1, len(headers) + 1):
             ws.cell(row=1, column=col).font = header_font
             ws.cell(row=1, column=col).alignment = center_align
+
+        if include_summary:
+            summary = wb.create_sheet("Summary")
+            summary.append(["Metric", "Value"])
+            summary.cell(row=1, column=1).font = header_font
+            summary.cell(row=1, column=2).font = header_font
+
+            total_pages = len(page_scores)
+            total_questions = max(page_totals) if page_totals else 0
+            avg_score = statistics.mean(page_scores) if page_scores else 0
+            median_score = statistics.median(page_scores) if page_scores else 0
+            max_score = max(page_scores) if page_scores else 0
+            min_score = min(page_scores) if page_scores else 0
+            stdev_score = statistics.pstdev(page_scores) if len(page_scores) > 1 else 0
+            avg_blank = statistics.mean(page_blank_counts) if page_blank_counts else 0
+            avg_multi = statistics.mean(page_multi_counts) if page_multi_counts else 0
+
+            summary.append(["Total Pages", total_pages])
+            summary.append(["Total Questions", total_questions])
+            summary.append(["Average Score", avg_score])
+            summary.append(["Median Score", median_score])
+            summary.append(["Max Score", max_score])
+            summary.append(["Min Score", min_score])
+            summary.append(["Score Std Dev", stdev_score])
+            summary.append(["Avg Blank Answers", avg_blank])
+            summary.append(["Avg Multiple Answers", avg_multi])
+
+        if include_topics:
+            topics_sheet = wb.create_sheet("Topics")
+            topics_sheet.append(["Question", "Topic"])
+            topics_sheet.cell(row=1, column=1).font = header_font
+            topics_sheet.cell(row=1, column=2).font = header_font
+            for q in sorted_qs:
+                topics_sheet.append([f"Q{q}", self.topic_map.get(q, "")])
+
+            topic_groups = {}
+            for q in sorted_qs:
+                topic = self.topic_map.get(q, "").strip() or "Unassigned"
+                topic_groups.setdefault(topic, []).append(q)
+
+            analysis = wb.create_sheet("Topic Analysis")
+            analysis.append(["Topic", "Questions", "Avg Score", "Avg %"])
+            for col in range(1, 5):
+                analysis.cell(row=1, column=col).font = header_font
+
+            pages_count = len(page_scores)
+            for topic, qs in topic_groups.items():
+                total_items = max(1, len(qs) * max(1, pages_count))
+                correct_count = 0
+                for p_idx, res in self.results.items():
+                    if self.first_page_key and p_idx == 0:
+                        continue
+                    opts = res.get("options", {})
+                    for q in qs:
+                        correct_val = self.answer_key.get(q, "")
+                        if correct_val == "":
+                            continue
+                        val = opts.get(q, "")
+                        if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
+                            correct_count += 1
+                avg_score_topic = correct_count / max(1, pages_count)
+                avg_pct = correct_count / total_items * 100
+                analysis.append([topic, ", ".join([f"Q{q}" for q in qs]), avg_score_topic, avg_pct])
             
         wb.save(output_path)
         print(f"  Excel saved: {output_path}")
@@ -2892,6 +3273,8 @@ class OMRSoftware(QMainWindow):
             page_results = self.results.get(page_idx, {}) if hasattr(self, 'results') else {}
             opts = page_results.get("options", {})
             off_x, off_y = self.page_offsets.get(page_idx, (0, 0))
+            page_score = 0
+            page_total = 0
             
             for mark in self.view.option_marks:
                 rect = mark.sceneBoundingRect()
@@ -2909,6 +3292,16 @@ class OMRSoftware(QMainWindow):
                     q_num_int = int(q_num) if isinstance(q_num, (int, str)) and str(q_num).isdigit() else q_num
                     student_answer = opts.get(q_num_int, "") or opts.get(q_num, "") or opts.get(str(q_num), "")
                     correct_answer = self.answer_key.get(q_num_int, "") or self.answer_key.get(q_num, "") or self.answer_key.get(str(q_num), "")
+                    
+                    student_clean = "".join(str(student_answer).split()).upper()
+                    correct_clean = "".join(str(correct_answer).split()).upper()
+                    is_blank = student_clean == ""
+                    is_multi = len(student_clean) > 1
+                    is_correct = bool(correct_clean) and student_clean == correct_clean
+                    if correct_clean:
+                        page_total += 1
+                        if is_correct:
+                            page_score += 1
                     
                     num_options = getattr(mark, "options_count", 4)
                     cell_width = mw // num_options
@@ -2934,10 +3327,45 @@ class OMRSoftware(QMainWindow):
                                 painter.drawLine(cell_center_x + 8, cell_center_y - 8, cell_center_x - 8, cell_center_y + 8)
                                 painter.restore()
                     
+                    if is_blank:
+                        painter.save()
+                        painter.setPen(QPen(QColor(255, 193, 7), 3))
+                        painter.drawRect(x, y, mw, mh)
+                        painter.restore()
+                    elif is_multi:
+                        painter.save()
+                        painter.setPen(QPen(QColor(255, 140, 0), 3))
+                        painter.drawRect(x, y, mw, mh)
+                        painter.restore()
+                    
+                    marker_x = x + mw + 8
+                    marker_y = y + mh // 2 + 5
+                    painter.save()
+                    painter.setFont(QFont("Arial", 11, QFont.Bold))
+                    if is_blank:
+                        painter.setPen(QPen(QColor(255, 193, 7), 2))
+                        painter.drawText(marker_x, marker_y, "Ø")
+                    elif is_multi:
+                        painter.setPen(QPen(QColor(255, 140, 0), 2))
+                        painter.drawText(marker_x, marker_y, "!")
+                    else:
+                        painter.setPen(QPen(QColor(40, 167, 69), 2) if is_correct else QPen(QColor(220, 53, 69), 2))
+                        painter.drawText(marker_x, marker_y, "✓" if is_correct else "✗")
+                    painter.restore()
+                    
                     painter.setPen(QPen(QColor(0, 0, 0), 1))
                     painter.setFont(QFont("Arial", 10, QFont.Bold))
                     painter.drawText(x - 30, y + mh // 2 + 5, f"Q{q_num}")
             
+            painter.save()
+            painter.setFont(QFont("Arial", 14, QFont.Bold))
+            painter.setPen(QPen(QColor(0, 0, 0), 2))
+            score_text = f"Score: {page_score}/{page_total}"
+            metrics = painter.fontMetrics()
+            text_width = metrics.horizontalAdvance(score_text)
+            x_pos = max(10, w - text_width - 10)
+            painter.drawText(x_pos, 30, score_text)
+            painter.restore()
             painter.end()
             
             output_path = os.path.join(output_folder, f"page_{page_idx + 1:03d}.png")
