@@ -28,7 +28,7 @@ from PyQt5.QtWidgets import (
     QDialog, QComboBox, QCheckBox, QTextEdit, QGraphicsRectItem,
     QSpinBox, QGroupBox, QTableWidget, QTableWidgetItem, QSplitter,
     QMessageBox, QInputDialog, QScrollArea, QFrame, QSlider,
-    QGraphicsPixmapItem, QMenu, QAction, QDialogButtonBox
+    QGraphicsPixmapItem, QMenu, QAction, QDialogButtonBox, QAbstractItemView
 )
 from PyQt5.QtGui import QPixmap, QImage, QPen, QBrush, QColor, QPainter, QFont, QWheelEvent, QCursor, QDesktopServices
 from PyQt5.QtCore import Qt, QRectF, QPointF, QUrl
@@ -1538,6 +1538,10 @@ class OMRSoftware(QMainWindow):
         btn_export.clicked.connect(self.export_excel)
         p_layout.addWidget(btn_export)
 
+        btn_student_info = QPushButton("Student Info (Manual / Paste)")
+        btn_student_info.clicked.connect(self.edit_student_info)
+        p_layout.addWidget(btn_student_info)
+
         self.check_include_summary = QCheckBox("Include summary analysis in Excel")
         self.check_include_summary.setChecked(True)
         p_layout.addWidget(self.check_include_summary)
@@ -1724,6 +1728,137 @@ class OMRSoftware(QMainWindow):
             for res in self.results.values():
                 questions.update(res.get("options", {}).keys())
         return sorted(questions)
+
+    def _get_text_field_labels(self):
+        labels = []
+
+        def add_label(val):
+            val = str(val).strip() if val is not None else ""
+            if val and val not in labels:
+                labels.append(val)
+
+        for default_label in ["班別", "學號", "姓名"]:
+            add_label(default_label)
+
+        if hasattr(self, "view") and getattr(self.view, "text_marks", None):
+            for mark in self.view.text_marks:
+                add_label(mark.label or f"Field {mark.question_num}")
+
+        if hasattr(self, "results"):
+            for res in self.results.values():
+                for key in res.get("text", {}).keys():
+                    add_label(key)
+
+        return labels
+
+    def _ensure_results_for_pages(self):
+        if not hasattr(self, "results") or self.results is None:
+            self.results = {}
+        total_pages = len(self.pdf_document) if self.pdf_document else 0
+        for p_idx in range(total_pages):
+            if p_idx not in self.results:
+                self.results[p_idx] = {
+                    "options": {},
+                    "text": {},
+                    "option_crops": {},
+                    "text_crops": {}
+                }
+            else:
+                self.results[p_idx].setdefault("options", {})
+                self.results[p_idx].setdefault("text", {})
+                self.results[p_idx].setdefault("option_crops", {})
+                self.results[p_idx].setdefault("text_crops", {})
+
+    def edit_student_info(self):
+        if not self.pdf_document:
+            QMessageBox.warning(self, "Student Info", "Please import a PDF first.")
+            return
+
+        self._ensure_results_for_pages()
+        labels = self._get_text_field_labels()
+
+        if not labels:
+            QMessageBox.information(self, "Student Info", "No text fields found or defined.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Student Info (Manual / Paste)")
+        dialog.resize(700, 500)
+        layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel("Paste from Excel: rows = students, columns = 姓名/班別/學號... (tab-separated)."))
+
+        table = QTableWidget()
+        table.setColumnCount(1 + len(labels))
+        table.setHorizontalHeaderLabels(["Page"] + labels)
+        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        table.setEditTriggers(QAbstractItemView.AllEditTriggers)
+
+        page_indices = []
+        for p_idx in range(len(self.pdf_document)):
+            if self.first_page_key and p_idx == 0:
+                continue
+            page_indices.append(p_idx)
+
+        table.setRowCount(len(page_indices))
+
+        for row, p_idx in enumerate(page_indices):
+            page_item = QTableWidgetItem(str(p_idx + 1))
+            page_item.setFlags(Qt.ItemIsEnabled)
+            table.setItem(row, 0, page_item)
+
+            page_texts = self.results.get(p_idx, {}).get("text", {})
+            for col, label in enumerate(labels, start=1):
+                val = page_texts.get(label, "")
+                table.setItem(row, col, QTableWidgetItem(str(val)))
+
+        layout.addWidget(table)
+
+        btn_row = QHBoxLayout()
+        btn_paste = QPushButton("Paste from Clipboard")
+        btn_row.addWidget(btn_paste)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        layout.addWidget(buttons)
+
+        def paste_from_clipboard():
+            text = QtWidgets.QApplication.clipboard().text()
+            if not text.strip():
+                QMessageBox.information(self, "Paste", "Clipboard is empty.")
+                return
+
+            rows = [r for r in text.splitlines() if r.strip() != ""]
+            start_row = table.currentRow()
+            if start_row < 0:
+                start_row = 0
+
+            for r_idx, line in enumerate(rows):
+                tgt_row = start_row + r_idx
+                if tgt_row >= table.rowCount():
+                    break
+                cols = line.split("\t")
+                for c_idx, val in enumerate(cols):
+                    if c_idx >= len(labels):
+                        break
+                    table.setItem(tgt_row, c_idx + 1, QTableWidgetItem(val.strip()))
+
+        def accept():
+            self._ensure_results_for_pages()
+            for row, p_idx in enumerate(page_indices):
+                page_texts = self.results[p_idx].setdefault("text", {})
+                for col, label in enumerate(labels, start=1):
+                    item = table.item(row, col)
+                    page_texts[label] = item.text().strip() if item else ""
+            dialog.accept()
+            self.update_result_table()
+
+        btn_paste.clicked.connect(paste_from_clipboard)
+        buttons.accepted.connect(accept)
+        buttons.rejected.connect(dialog.reject)
+
+        dialog.exec_()
 
     def edit_topics(self):
         questions = self._get_all_questions()

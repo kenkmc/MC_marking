@@ -11,6 +11,18 @@ dist/
 # Debug outputs
 debug_crops/
 
+# VS Code / local settings
+.vscode/
+
+# Virtual environment
+.venv/
+
+# Local environment/config
+.env
+.env.*
+*.log
+*.tmp
+
 # OS
 .DS_Store
 Thumbs.db
