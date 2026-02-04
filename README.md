@@ -54,6 +54,24 @@ To improve accuracy:
 
 OCR accuracy for text fields varies by handwriting/print quality, font, and language. Manual editing is supported for corrections.
 
+## Run from Python (step-by-step)
+
+1. **Create a virtual environment** (one time):
+	- `python -m venv .venv`
+2. **Activate the environment**:
+	- PowerShell: `.venv\Scripts\Activate.ps1`
+3. **Install dependencies**:
+	- `pip install --upgrade pip`
+	- `pip install -r requirements.txt`
+4. **Run the app**:
+	- `python omr_software.py`
+
+Notes:
+
+- If you want to run via the entry point: `python main.py`
+- EasyOCR downloads models on first run (internet required)
+- If you use Tesseract, install it separately and ensure it is on PATH
+
 ## Build a Windows EXE
 
 The steps below build a standalone Windows executable (.exe) that runs without preinstalled Python.
@@ -75,7 +93,6 @@ Output:
 - **EasyOCR** downloads models on first run (internet required).
 - If you use **Tesseract**, install Tesseract OCR separately; otherwise use EasyOCR.
 - To reduce size, remove unused OCR modules and rebuild.
-- Custom icon: place [app.ico](app.ico) at the project root and rebuild.
 
 ### Advanced: manual build
 
