@@ -38,6 +38,8 @@ import json
 import os
 import re
 import io
+import zipfile
+import shutil
 import cv2
 import numpy as np
 import statistics
@@ -705,6 +707,7 @@ class OMRSoftware(QMainWindow):
         self.align_reference_gray = None
         self.align_reference_size = None
         self.topic_map = {}
+        self.debug_records = []
         
         self.init_ui()
         
@@ -1074,7 +1077,7 @@ class OMRSoftware(QMainWindow):
         
         return (x1, y1, x2, y2)
 
-    def detect_filled_option(self, image, options_count=4, save_debug=False):
+    def detect_filled_option(self, image, options_count=4, save_debug=False, context=None):
         """
         Detect which option is filled in a multiple choice bubble area.
         Divides the image into options_count cells and checks which one is filled.
@@ -1259,8 +1262,8 @@ class OMRSoftware(QMainWindow):
             # Uses relative thresholds based on the score distribution
             
             # Minimum thresholds - lowered to catch lighter marks
-            MIN_COMBINED_THRESHOLD = 8.0   # Minimum combined score for filled mark
-            MIN_DARKNESS_THRESHOLD = 3.0   # Minimum darkness difference
+            MIN_COMBINED_THRESHOLD = 5.0   # Minimum combined score for filled mark
+            MIN_DARKNESS_THRESHOLD = 2.0   # Minimum darkness difference
             MIN_SCORE_RANGE = 10.0  # Minimum range - the key indicator of a filled mark
             
             # For blank detection: if ALL scores are very close and low, it's blank
@@ -1296,6 +1299,26 @@ class OMRSoftware(QMainWindow):
                 seen.add(opt)
         result = "".join(unique_options)
         print(f"  Detected filled option(s): {result if result else '(none)'}")
+
+        try:
+            record = {
+                "context": context or {},
+                "options_count": options_count,
+                "scores": cell_scores,
+                "result": result,
+                "thresholds": {
+                    "min_combined": MIN_COMBINED_THRESHOLD,
+                    "min_darkness": MIN_DARKNESS_THRESHOLD,
+                    "min_score_range": MIN_SCORE_RANGE,
+                    "blank_max_range": BLANK_MAX_RANGE,
+                    "blank_max_combined": BLANK_MAX_COMBINED
+                }
+            }
+            if hasattr(self, "debug_records"):
+                self.debug_records.append(record)
+        except Exception:
+            pass
+
         return result
 
     def get_ocr_result(self, image, save_debug=False):
@@ -1533,6 +1556,14 @@ class OMRSoftware(QMainWindow):
         btn_process = QPushButton("Recognize All Pages")
         btn_process.clicked.connect(self.run_recognition_all)
         p_layout.addWidget(btn_process)
+
+        self.check_export_images = QCheckBox("Include images with answers")
+        self.check_export_images.setChecked(True)
+        p_layout.addWidget(self.check_export_images)
+
+        btn_export_all = QPushButton("Export Results (Excel + Images)")
+        btn_export_all.clicked.connect(self.export_results_bundle)
+        p_layout.addWidget(btn_export_all)
         
         btn_export = QPushButton("Export to Excel")
         btn_export.clicked.connect(self.export_excel)
@@ -1557,6 +1588,10 @@ class OMRSoftware(QMainWindow):
         btn_export_img = QPushButton("Export Images with Answers")
         btn_export_img.clicked.connect(self.export_images)
         p_layout.addWidget(btn_export_img)
+
+        btn_export_debug = QPushButton("Export Debug Folder")
+        btn_export_debug.clicked.connect(self.export_debug_pack)
+        p_layout.addWidget(btn_export_debug)
         
         left_layout.addWidget(proc_grp)
         
@@ -2094,6 +2129,7 @@ class OMRSoftware(QMainWindow):
             return
             
         self.results = {}
+        self.debug_records = []
         
         # Save current page's image offset before processing
         if self.current_pixmap_item:
@@ -2185,7 +2221,16 @@ class OMRSoftware(QMainWindow):
                         
                         if mark.mark_type == MARK_TYPE_OPTION:
                             # Use bubble detection for options
-                            text = self.detect_filled_option(crop, mark.options_count, save_debug=True)
+                            text = self.detect_filled_option(
+                                crop,
+                                mark.options_count,
+                                save_debug=True,
+                                context={
+                                    "page": p_idx + 1,
+                                    "question": mark.question_num,
+                                    "label": f"Q{mark.question_num}"
+                                }
+                            )
                         else:
                             # Use OCR for text fields
                             text = self.get_ocr_result(crop, save_debug=True)
@@ -2629,6 +2674,28 @@ class OMRSoftware(QMainWindow):
             msg += f"\n🔶 {multiple_count} multiple selections highlighted in orange."
         msg += "\n\n📊 Per-question % correct statistics added at bottom."
         QMessageBox.information(self, "Done", msg)
+
+    def export_results_bundle(self):
+        """Export Excel (and optionally images) to the same folder as the PDF."""
+        if not hasattr(self, 'results'):
+            QMessageBox.warning(self, "Error", "No results to export")
+            return
+        if not hasattr(self, 'pdf_path') or not self.pdf_path:
+            QMessageBox.warning(self, "Error", "No PDF loaded")
+            return
+
+        prefix = self._get_pdf_prefix()
+        timestamp = self._get_timestamp()
+        parent_folder = os.path.dirname(self.pdf_path)
+
+        excel_path = os.path.join(parent_folder, f"{prefix}_{timestamp}.xlsx")
+        self._export_excel_internal(excel_path)
+
+        if self.check_export_images.isChecked():
+            img_folder = os.path.join(parent_folder, f"{prefix}_{timestamp}")
+            self._export_images_internal(img_folder)
+
+        QMessageBox.information(self, "Done", f"Exported results to:\n{parent_folder}")
     
     def export_images(self):
         """Export scanned pages as images with answer overlay (red dots for correct answers)"""
@@ -2822,6 +2889,63 @@ class OMRSoftware(QMainWindow):
         
         progress.setValue(len(self.pdf_document))
         QMessageBox.information(self, "Done", f"Exported {len(self.pdf_document)} images to:\n{folder}")
+
+    def export_debug_pack(self):
+        """Export debug images and scoring records into a folder for easy sharing."""
+        has_records = bool(getattr(self, "debug_records", []))
+        debug_dir = "debug_crops"
+        has_debug_images = os.path.isdir(debug_dir) and any(os.scandir(debug_dir))
+
+        if not has_records and not has_debug_images:
+            QMessageBox.information(self, "Debug Pack", "No debug data found. Run recognition with debug enabled first.")
+            return
+
+        prefix = self._get_pdf_prefix()
+        timestamp = self._get_timestamp()
+        default_folder = f"{prefix}_{timestamp}_debug"
+
+        parent_folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
+        if not parent_folder:
+            return
+
+        out_folder = os.path.join(parent_folder, default_folder)
+
+        try:
+            os.makedirs(out_folder, exist_ok=True)
+
+            if has_records:
+                records_path = os.path.join(out_folder, "debug_records.json")
+                with open(records_path, "w", encoding="utf-8") as f:
+                    json.dump(self.debug_records, f, ensure_ascii=False, indent=2)
+
+            if hasattr(self, "pdf_path") and self.pdf_path and os.path.isfile(self.pdf_path):
+                try:
+                    shutil.copy2(self.pdf_path, os.path.join(out_folder, os.path.basename(self.pdf_path)))
+                except Exception:
+                    pass
+
+            if has_debug_images:
+                out_debug_dir = os.path.join(out_folder, "debug_crops")
+                os.makedirs(out_debug_dir, exist_ok=True)
+
+                files = [e for e in os.scandir(debug_dir) if e.is_file()]
+                progress = QtWidgets.QProgressDialog("Exporting debug images...", "Cancel", 0, len(files), self)
+                progress.setWindowModality(Qt.WindowModal)
+                progress.setMinimumDuration(0)
+                progress.show()
+
+                for idx, entry in enumerate(files):
+                    if progress.wasCanceled():
+                        break
+                    progress.setValue(idx)
+                    QtWidgets.QApplication.processEvents()
+                    shutil.copy2(entry.path, os.path.join(out_debug_dir, entry.name))
+
+                progress.setValue(len(files))
+
+            QMessageBox.information(self, "Debug Pack", f"Debug folder exported:\n{out_folder}")
+        except Exception as e:
+            QMessageBox.critical(self, "Debug Pack", f"Failed to export debug folder:\n{e}")
 
     # ==================== Batch Processing ====================
     
@@ -3101,6 +3225,7 @@ class OMRSoftware(QMainWindow):
             return
         
         self.results = {}
+        self.debug_records = []
         
         # Save current page's image offset before processing
         if self.current_pixmap_item:
@@ -3162,7 +3287,15 @@ class OMRSoftware(QMainWindow):
                     crop = img_np[y1:y2, x1:x2]
                     crop_pil = Image.fromarray(crop)
                     opt = mark.options_count
-                    result_opt = self.detect_filled_option(crop_pil, opt)
+                    result_opt = self.detect_filled_option(
+                        crop_pil,
+                        opt,
+                        context={
+                            "page": p_idx + 1,
+                            "question": mark.question_num,
+                            "label": f"Q{mark.question_num}"
+                        }
+                    )
                     page_result["options"][mark.question_num] = result_opt
 
             self.results[p_idx] = page_result

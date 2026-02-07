@@ -84,11 +84,14 @@ Or use PowerShell:
 
 - [build_exe.ps1](build_exe.ps1)
 
-Output:
+Output (onedir build):
 
-- [dist/CheckMate.exe](dist/CheckMate.exe)
+- [dist/CheckMate/CheckMate.exe](dist/CheckMate/CheckMate.exe)
 
 ### Important notes
+
+- This project uses an **onedir** build to avoid extracting ~1GB to temp on every run.
+- If you need a single-file build, expect slower startup and large temp extraction.
 
 - **EasyOCR** downloads models on first run (internet required).
 - If you use **Tesseract**, install Tesseract OCR separately; otherwise use EasyOCR.
