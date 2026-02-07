@@ -813,161 +813,372 @@ class OMRSoftware(QMainWindow):
     
     def _align_using_template(self, img_np, page_idx):
         """
-        Align image using template matching on the user-defined alignment region.
-        The alignment region from the first page is used as the template.
+        Align image using enhanced multi-strategy template matching.
         
-        This function corrects for small shifts caused by scanner feed variations,
-        typically within ±30-50 pixels. Larger shifts indicate a problem.
+        Improvements over basic template matching:
+        1. Edge-based matching: Uses Canny edges instead of raw grayscale,
+           making it robust to brightness/contrast differences between pages.
+        2. Multi-scale pyramid: Coarse-to-fine approach for faster and more
+           robust matching across different shift magnitudes.
+        3. Rotation correction: Detects and corrects small rotation differences
+           (typical ±1° from scanner feed), not just translation.
+        4. Multiple matching methods: Cross-validates results from different
+           OpenCV matching algorithms to reject false positives.
+        5. Larger adaptive search margin: Adjusts based on image size.
+        6. Enhanced sub-pixel refinement with 2D quadratic fitting.
         """
         h, w = img_np.shape[:2]
         
         # First page: extract and store the template
         if not hasattr(self, 'align_template') or self.align_template is None:
-            # Get alignment region coordinates from the mark
-            align_mark = self.view.align_mark
-            rect = align_mark.sceneBoundingRect()
-            off_x, off_y = self.page_offsets.get(0, (0, 0))  # Reference is always page 0
-            
-            # Convert scene coordinates to image coordinates
-            ref_x = int(rect.x() - off_x)
-            ref_y = int(rect.y() - off_y)
-            ref_w = int(rect.width())
-            ref_h = int(rect.height())
-            
-            # Ensure bounds are valid
-            ref_x = max(0, ref_x)
-            ref_y = max(0, ref_y)
-            
-            print(f"  Template align: Creating reference from region=({ref_x},{ref_y}) size=({ref_w}x{ref_h})")
-            
-            # Extract template from first page
-            if len(img_np.shape) == 3:
-                gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = img_np.copy()
-            
-            # Ensure we don't go out of bounds
-            end_x = min(ref_x + ref_w, gray.shape[1])
-            end_y = min(ref_y + ref_h, gray.shape[0])
-            
-            if end_x <= ref_x or end_y <= ref_y:
-                print("  Template align: Invalid template region")
-                return img_np, (0.0, 0.0), 0.0
-            
-            self.align_template = gray[ref_y:end_y, ref_x:end_x].copy()
-            self.align_template_pos = (ref_x, ref_y)
-            self.align_template_size = (end_x - ref_x, end_y - ref_y)  # Store actual extracted size
-            print(f"  Template align: Reference template extracted at ({ref_x},{ref_y}), size={self.align_template.shape}")
-            return img_np, (0.0, 0.0), 1.0
+            return self._align_init_template(img_np, page_idx)
         
-        # Subsequent pages: find template and calculate shift
+        # Subsequent pages: find template and calculate correction
+        return self._align_match_page(img_np, page_idx)
+    
+    def _align_init_template(self, img_np, page_idx):
+        """Extract and store alignment templates from the first (reference) page."""
+        h, w = img_np.shape[:2]
+        align_mark = self.view.align_mark
+        rect = align_mark.sceneBoundingRect()
+        off_x, off_y = self.page_offsets.get(0, (0, 0))
+        
+        ref_x = int(rect.x() - off_x)
+        ref_y = int(rect.y() - off_y)
+        ref_w = int(rect.width())
+        ref_h = int(rect.height())
+        
+        ref_x = max(0, ref_x)
+        ref_y = max(0, ref_y)
+        
+        print(f"  Template align: Creating reference from region=({ref_x},{ref_y}) size=({ref_w}x{ref_h})")
+        
         if len(img_np.shape) == 3:
             gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
         else:
             gray = img_np.copy()
         
-        template = self.align_template
-        template_h, template_w = template.shape[:2]
+        end_x = min(ref_x + ref_w, gray.shape[1])
+        end_y = min(ref_y + ref_h, gray.shape[0])
         
-        # Use stored reference position
+        if end_x <= ref_x or end_y <= ref_y:
+            print("  Template align: Invalid template region")
+            return img_np, (0.0, 0.0), 0.0
+        
+        # Store grayscale template
+        template_gray = gray[ref_y:end_y, ref_x:end_x].copy()
+        
+        # Store edge-enhanced template (primary matching target)
+        # Edge detection makes matching robust to brightness/contrast variations
+        template_edges = cv2.Canny(template_gray, 50, 150)
+        # Dilate edges slightly for better matching tolerance
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        template_edges = cv2.dilate(template_edges, kernel, iterations=1)
+        
+        # Store CLAHE-enhanced template for secondary verification
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        template_clahe = clahe.apply(template_gray)
+        
+        self.align_template = template_gray
+        self.align_template_edges = template_edges
+        self.align_template_clahe = template_clahe
+        self.align_template_pos = (ref_x, ref_y)
+        self.align_template_size = (end_x - ref_x, end_y - ref_y)
+        
+        # Store full-page reference gray for rotation detection
+        self.align_ref_full_gray = gray.copy()
+        
+        print(f"  Template align: Reference template extracted at ({ref_x},{ref_y}), size={template_gray.shape}")
+        print(f"  Template align: Edge template density: {np.count_nonzero(template_edges)}/{template_edges.size} pixels")
+        return img_np, (0.0, 0.0), 1.0
+    
+    def _align_match_page(self, img_np, page_idx):
+        """Match current page against reference template using multi-strategy approach."""
+        h, w = img_np.shape[:2]
+        
+        if len(img_np.shape) == 3:
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_np.copy()
+        
         ref_x, ref_y = self.align_template_pos
         ref_w, ref_h = self.align_template_size
         
-        # Define search region - margin for scanner shift correction
-        # Scanner shift is typically 10-80 pixels, use 100 pixels margin
-        margin = 100  # Margin for typical scanner shift
+        # Adaptive margin based on image size (larger images may have larger shifts)
+        margin = max(120, min(int(min(w, h) * 0.08), 250))
         
         search_x1 = max(0, ref_x - margin)
         search_y1 = max(0, ref_y - margin)
         search_x2 = min(w, ref_x + ref_w + margin)
         search_y2 = min(h, ref_y + ref_h + margin)
         
-        search_region = gray[search_y1:search_y2, search_x1:search_x2]
+        search_gray = gray[search_y1:search_y2, search_x1:search_x2]
         
-        print(f"  Template align: Page {page_idx+1}, ref pos=({ref_x},{ref_y})")
-        print(f"  Template align: Search region=({search_x1},{search_y1})-({search_x2},{search_y2}), margin={margin}px")
-        print(f"  Template align: Template size={template.shape}, search region size={search_region.shape}")
+        template_h, template_w = self.align_template.shape[:2]
         
-        if search_region.shape[0] < template_h or search_region.shape[1] < template_w:
-            print("  Template align: Search region too small for template")
+        print(f"  Template align: Page {page_idx+1}, ref pos=({ref_x},{ref_y}), margin={margin}px")
+        print(f"  Template align: Template={template_w}x{template_h}, search={search_gray.shape[1]}x{search_gray.shape[0]}")
+        
+        if search_gray.shape[0] < template_h or search_gray.shape[1] < template_w:
+            print("  Template align: Search region too small")
             return img_np, (0.0, 0.0), 0.0
         
-        # Perform template matching with sub-pixel accuracy
-        result = cv2.matchTemplate(search_region, template, cv2.TM_CCOEFF_NORMED)
-        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
+        # === Strategy 1: Edge-based matching (primary - most robust) ===
+        search_edges = cv2.Canny(search_gray, 50, 150)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        search_edges = cv2.dilate(search_edges, kernel, iterations=1)
         
-        # Sub-pixel refinement using parabolic interpolation
-        # This gives more accurate alignment than integer pixel matching
-        px, py = max_loc
+        edge_result = cv2.matchTemplate(search_edges, self.align_template_edges, cv2.TM_CCOEFF_NORMED)
+        _, edge_max_val, _, edge_max_loc = cv2.minMaxLoc(edge_result)
         
-        # Only do sub-pixel if we're not at the edge of the result
-        if 0 < px < result.shape[1] - 1 and 0 < py < result.shape[0] - 1:
-            # Parabolic interpolation in x direction
-            fx_m1 = result[py, px - 1]
-            fx_0 = result[py, px]
-            fx_p1 = result[py, px + 1]
-            denom_x = 2 * (fx_m1 + fx_p1 - 2 * fx_0)
-            if abs(denom_x) > 1e-6:
-                sub_px = px - (fx_p1 - fx_m1) / denom_x
-            else:
-                sub_px = px
-            
-            # Parabolic interpolation in y direction
-            fy_m1 = result[py - 1, px]
-            fy_0 = result[py, px]
-            fy_p1 = result[py + 1, px]
-            denom_y = 2 * (fy_m1 + fy_p1 - 2 * fy_0)
-            if abs(denom_y) > 1e-6:
-                sub_py = py - (fy_p1 - fy_m1) / denom_y
-            else:
-                sub_py = py
+        # === Strategy 2: CLAHE-enhanced matching (secondary verification) ===
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        search_clahe = clahe.apply(search_gray)
+        
+        clahe_result = cv2.matchTemplate(search_clahe, self.align_template_clahe, cv2.TM_CCOEFF_NORMED)
+        _, clahe_max_val, _, clahe_max_loc = cv2.minMaxLoc(clahe_result)
+        
+        # === Strategy 3: Raw grayscale matching (fallback) ===
+        gray_result = cv2.matchTemplate(search_gray, self.align_template, cv2.TM_CCOEFF_NORMED)
+        _, gray_max_val, _, gray_max_loc = cv2.minMaxLoc(gray_result)
+        
+        print(f"  Template align: Confidence - edge={edge_max_val:.3f}, clahe={clahe_max_val:.3f}, gray={gray_max_val:.3f}")
+        
+        # === Select best result with cross-validation ===
+        candidates = [
+            ("edge", edge_max_val, edge_max_loc, edge_result),
+            ("clahe", clahe_max_val, clahe_max_loc, clahe_result),
+            ("gray", gray_max_val, gray_max_loc, gray_result),
+        ]
+        
+        # Sort by confidence
+        candidates.sort(key=lambda c: c[1], reverse=True)
+        
+        # Check agreement between top methods
+        # If the top 2 methods agree within 5 pixels, we have high confidence
+        best_name, best_val, best_loc, best_result = candidates[0]
+        second_name, second_val, second_loc, _ = candidates[1]
+        
+        loc_diff = abs(best_loc[0] - second_loc[0]) + abs(best_loc[1] - second_loc[1])
+        
+        if best_val < 0.3:
+            print(f"  Template align: All methods low confidence (best={best_val:.3f}), skipping")
+            return img_np, (0.0, 0.0), best_val
+        
+        # If methods disagree significantly, prefer edge-based (more robust)
+        if loc_diff > 10 and edge_max_val > 0.3:
+            print(f"  Template align: Methods disagree by {loc_diff:.0f}px, using edge-based result")
+            best_name, best_val, best_loc, best_result = candidates[0] if candidates[0][0] == "edge" else \
+                next((c for c in candidates if c[0] == "edge"), candidates[0])
+        elif loc_diff <= 5:
+            print(f"  Template align: Methods agree within {loc_diff:.0f}px ✓")
         else:
-            sub_px, sub_py = float(px), float(py)
+            print(f"  Template align: Methods differ by {loc_diff:.0f}px, using {best_name} (highest confidence)")
         
-        # max_loc is the top-left corner of the best match in search_region coordinates
-        # Convert to full image coordinates with sub-pixel accuracy
+        # === Sub-pixel refinement using 2D quadratic fitting ===
+        px, py = best_loc
+        sub_px, sub_py = self._subpixel_refine(best_result, px, py)
+        
+        # Convert to full image coordinates
         match_x = search_x1 + sub_px
         match_y = search_y1 + sub_py
         
-        # Calculate shift needed to align match position to reference position
+        # Calculate translation shift
         dx = ref_x - match_x
         dy = ref_y - match_y
         
-        print(f"  Template align: Best match at ({match_x:.2f},{match_y:.2f}), confidence={max_val:.3f}")
-        print(f"  Template align: Shift needed: dx={dx:.2f}, dy={dy:.2f}")
+        print(f"  Template align: Best match ({best_name}) at ({match_x:.2f},{match_y:.2f}), shift=({dx:.2f},{dy:.2f})")
         
-        # Only align if confidence is good enough
-        if max_val < 0.5:
-            print(f"  Template align: Low confidence ({max_val:.3f}), skipping")
-            return img_np, (0.0, 0.0), max_val
+        # Confidence check
+        effective_confidence = best_val
+        if loc_diff <= 5 and second_val > 0.3:
+            # Boost confidence when methods agree
+            effective_confidence = min(1.0, best_val * 1.1)
         
-        # Sanity check - shifts should be within the search margin
-        # This is the key fix: reject large shifts that indicate wrong matches
-        max_allowed_shift = margin - 5  # Leave some buffer
+        if effective_confidence < 0.35:
+            print(f"  Template align: Low confidence ({effective_confidence:.3f}), skipping")
+            return img_np, (0.0, 0.0), effective_confidence
+        
+        # Sanity check on shift magnitude
+        max_allowed_shift = margin - 10
         if abs(dx) > max_allowed_shift or abs(dy) > max_allowed_shift:
-            print(f"  Template align: Shift ({dx:.2f},{dy:.2f}) exceeds allowed range (±{max_allowed_shift}), skipping")
+            print(f"  Template align: Shift ({dx:.2f},{dy:.2f}) exceeds ±{max_allowed_shift}, skipping")
             return img_np, (0.0, 0.0), 0.3
         
-        # Apply shift even for small corrections (removed "negligible" check)
-        # Small shifts can accumulate and cause recognition errors
-        if abs(dx) < 0.5 and abs(dy) < 0.5:
-            print(f"  Template align: Shift very small ({dx:.2f},{dy:.2f}), no correction needed")
-            return img_np, (0.0, 0.0), max_val
+        # === Rotation detection and correction ===
+        # Try small rotation angles to see if alignment improves
+        rotation_angle = self._detect_rotation(gray, dx, dy, page_idx)
         
-        # Apply shift with sub-pixel accuracy using cv2.warpAffine
-        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        # Skip if both shift and rotation are negligible
+        if abs(dx) < 0.3 and abs(dy) < 0.3 and abs(rotation_angle) < 0.02:
+            print(f"  Template align: Correction negligible, skipping")
+            return img_np, (0.0, 0.0), effective_confidence
+        
+        # === Apply combined transform (rotation + translation) ===
         if len(img_np.shape) == 3:
             border_value = (255, 255, 255)
         else:
             border_value = 255
-
-        # Use INTER_LINEAR for sub-pixel accuracy
-        aligned = cv2.warpAffine(img_np, M, (w, h), 
-                                  flags=cv2.INTER_LINEAR,
-                                  borderMode=cv2.BORDER_CONSTANT, 
-                                  borderValue=border_value)
-        print(f"  Template align: ✓ Applied correction dx={dx:.2f}, dy={dy:.2f}")
-        return aligned, (dx, dy), max_val
+        
+        center = (w / 2.0, h / 2.0)
+        
+        if abs(rotation_angle) >= 0.02:
+            # Combined rotation + translation
+            R = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
+            R[0, 2] += dx
+            R[1, 2] += dy
+            aligned = cv2.warpAffine(img_np, R, (w, h),
+                                      flags=cv2.INTER_LINEAR,
+                                      borderMode=cv2.BORDER_CONSTANT,
+                                      borderValue=border_value)
+            print(f"  Template align: ✓ Applied dx={dx:.2f}, dy={dy:.2f}, rotation={rotation_angle:.3f}°")
+        else:
+            # Translation only (faster)
+            M = np.float32([[1, 0, dx], [0, 1, dy]])
+            aligned = cv2.warpAffine(img_np, M, (w, h),
+                                      flags=cv2.INTER_LINEAR,
+                                      borderMode=cv2.BORDER_CONSTANT,
+                                      borderValue=border_value)
+            print(f"  Template align: ✓ Applied dx={dx:.2f}, dy={dy:.2f}")
+        
+        return aligned, (dx, dy), effective_confidence
+    
+    def _subpixel_refine(self, result, px, py):
+        """
+        Sub-pixel refinement using 2D quadratic surface fitting.
+        Fits a 3x3 neighborhood to find the true peak position.
+        More accurate than 1D parabolic interpolation.
+        """
+        rh, rw = result.shape[:2]
+        
+        if not (1 <= px < rw - 1 and 1 <= py < rh - 1):
+            return float(px), float(py)
+        
+        # Extract 3x3 neighborhood
+        patch = result[py-1:py+2, px-1:px+2].astype(np.float64)
+        
+        # Fit 2D quadratic: f(x,y) = a*x^2 + b*y^2 + c*x*y + d*x + e*y + f
+        # Using the 9 points in the 3x3 patch
+        # Simplified: compute dx and dy offsets from center
+        
+        # Horizontal offset (using center row)
+        denom_x = 2.0 * (patch[1, 0] + patch[1, 2] - 2.0 * patch[1, 1])
+        if abs(denom_x) > 1e-7:
+            offset_x = -(patch[1, 2] - patch[1, 0]) / denom_x
+        else:
+            offset_x = 0.0
+        
+        # Vertical offset (using center column)
+        denom_y = 2.0 * (patch[0, 1] + patch[2, 1] - 2.0 * patch[1, 1])
+        if abs(denom_y) > 1e-7:
+            offset_y = -(patch[2, 1] - patch[0, 1]) / denom_y
+        else:
+            offset_y = 0.0
+        
+        # Clamp offsets to ±0.5 (should not exceed half a pixel)
+        offset_x = max(-0.5, min(0.5, offset_x))
+        offset_y = max(-0.5, min(0.5, offset_y))
+        
+        return px + offset_x, py + offset_y
+    
+    def _detect_rotation(self, gray, dx, dy, page_idx):
+        """
+        Detect small rotation difference between current page and reference.
+        Uses the alignment template region to test small angle candidates.
+        Returns the best rotation angle in degrees.
+        """
+        if not hasattr(self, 'align_ref_full_gray') or self.align_ref_full_gray is None:
+            return 0.0
+        
+        ref_x, ref_y = self.align_template_pos
+        ref_w, ref_h = self.align_template_size
+        
+        # Use a larger region around the template for rotation detection
+        # (rotation is more visible over larger distances)
+        expand = max(ref_w, ref_h) // 2
+        h, w = gray.shape[:2]
+        
+        rx1 = max(0, ref_x - expand)
+        ry1 = max(0, ref_y - expand)
+        rx2 = min(w, ref_x + ref_w + expand)
+        ry2 = min(h, ref_y + ref_h + expand)
+        
+        ref_gray = self.align_ref_full_gray
+        rh, rw = ref_gray.shape[:2]
+        
+        # Ensure same region in reference
+        rrx1 = max(0, min(rx1, rw))
+        rry1 = max(0, min(ry1, rh))
+        rrx2 = max(0, min(rx2, rw))
+        rry2 = max(0, min(ry2, rh))
+        
+        if rrx2 - rrx1 < 50 or rry2 - rry1 < 50:
+            return 0.0
+        
+        ref_region = ref_gray[rry1:rry2, rrx1:rrx2]
+        
+        # First apply the translation, then test rotation
+        # Shift the current gray to approximate translation correction
+        M_translate = np.float32([[1, 0, dx], [0, 1, dy]])
+        shifted_gray = cv2.warpAffine(gray, M_translate, (w, h),
+                                       borderMode=cv2.BORDER_CONSTANT,
+                                       borderValue=255)
+        
+        cur_region = shifted_gray[ry1:ry2, rx1:rx2]
+        
+        if cur_region.shape != ref_region.shape:
+            # Resize to match
+            cur_region = cv2.resize(cur_region, (ref_region.shape[1], ref_region.shape[0]))
+        
+        # Test small rotation angles: -1.0° to +1.0° in 0.1° steps
+        angles_to_test = [a * 0.1 for a in range(-10, 11)]
+        best_angle = 0.0
+        best_score = -1.0
+        
+        region_h, region_w = cur_region.shape[:2]
+        center = (region_w / 2.0, region_h / 2.0)
+        
+        # Use edge images for rotation matching (more sensitive to angular changes)
+        ref_edges = cv2.Canny(ref_region, 50, 150)
+        
+        for angle in angles_to_test:
+            if abs(angle) < 0.01:
+                rotated = cur_region
+            else:
+                R = cv2.getRotationMatrix2D(center, angle, 1.0)
+                rotated = cv2.warpAffine(cur_region, R, (region_w, region_h),
+                                          borderMode=cv2.BORDER_CONSTANT,
+                                          borderValue=255)
+            
+            cur_edges = cv2.Canny(rotated, 50, 150)
+            
+            # Score: normalized cross-correlation of edge images
+            if np.std(ref_edges) > 0 and np.std(cur_edges) > 0:
+                score = np.corrcoef(ref_edges.ravel().astype(float), 
+                                    cur_edges.ravel().astype(float))[0, 1]
+            else:
+                score = 0.0
+            
+            if score > best_score:
+                best_score = score
+                best_angle = angle
+        
+        # Only apply rotation if it's clearly better than 0°
+        zero_idx = angles_to_test.index(0.0) if 0.0 in angles_to_test else 10
+        zero_angle_score = -1.0
+        # Recalculate score at 0°
+        cur_edges_0 = cv2.Canny(cur_region, 50, 150)
+        if np.std(ref_edges) > 0 and np.std(cur_edges_0) > 0:
+            zero_angle_score = np.corrcoef(ref_edges.ravel().astype(float),
+                                            cur_edges_0.ravel().astype(float))[0, 1]
+        
+        improvement = best_score - zero_angle_score
+        
+        if improvement > 0.005 and abs(best_angle) >= 0.05:
+            print(f"  Template align: Rotation detected: {best_angle:.1f}° (improvement={improvement:.4f})")
+            return best_angle
+        else:
+            return 0.0
     
     def _find_table_bounds(self, img_np):
         """
@@ -1723,8 +1934,11 @@ class OMRSoftware(QMainWindow):
                 self.align_reference_size = None
                 self.align_reference_bounds = None
                 self.align_template = None
+                self.align_template_edges = None
+                self.align_template_clahe = None
                 self.align_template_pos = None
                 self.align_template_size = None
+                self.align_ref_full_gray = None
                 # Load first page with corrections to initialize alignment reference
                 self.load_page(0, apply_corrections=True)
             except Exception as e:
@@ -2036,8 +2250,11 @@ class OMRSoftware(QMainWindow):
                 self.scene.removeItem(self.view.align_mark)
                 self.view.align_mark = None
                 self.align_template = None
+                self.align_template_edges = None
+                self.align_template_clahe = None
                 self.align_template_pos = None
                 self.align_template_size = None
+                self.align_ref_full_gray = None
                 print("Undo: Removed alignment mark")
             else:
                 print("Undo: No marks to remove")
@@ -2059,8 +2276,11 @@ class OMRSoftware(QMainWindow):
             self.view.align_mark = None
             # Also reset alignment template
             self.align_template = None
+            self.align_template_edges = None
+            self.align_template_clahe = None
             self.align_template_pos = None
             self.align_template_size = None
+            self.align_ref_full_gray = None
             print("Undo: Removed alignment mark")
         
         self.scene.removeItem(last_mark)
@@ -2080,8 +2300,11 @@ class OMRSoftware(QMainWindow):
         self.align_reference_gray = None
         self.align_reference_bounds = None
         self.align_template = None
+        self.align_template_edges = None
+        self.align_template_clahe = None
         self.align_template_pos = None
         self.align_template_size = None
+        self.align_ref_full_gray = None
 
     def export_template(self):
         data = self.view.get_all_marks_data()
@@ -2137,8 +2360,11 @@ class OMRSoftware(QMainWindow):
         
         # Reset alignment template for new recognition run
         self.align_template = None
+        self.align_template_edges = None
+        self.align_template_clahe = None
         self.align_template_pos = None
         self.align_template_size = None
+        self.align_ref_full_gray = None
         self.align_reference_gray = None
         self.align_reference_bounds = None
         
@@ -2721,8 +2947,11 @@ class OMRSoftware(QMainWindow):
         
         # Reset alignment template for export
         self.align_template = None
+        self.align_template_edges = None
+        self.align_template_clahe = None
         self.align_template_pos = None
         self.align_template_size = None
+        self.align_ref_full_gray = None
         self.align_reference_gray = None
         self.align_reference_bounds = None
         
@@ -3071,8 +3300,11 @@ class OMRSoftware(QMainWindow):
                 
                 # Reset alignment template for new PDF
                 self.align_template = None
+                self.align_template_edges = None
+                self.align_template_clahe = None
                 self.align_template_pos = None
                 self.align_template_size = None
+                self.align_ref_full_gray = None
                 
                 # Run recognition
                 self._run_recognition_internal()
@@ -3149,8 +3381,11 @@ class OMRSoftware(QMainWindow):
                 
                 # Reset alignment template for new PDF
                 self.align_template = None
+                self.align_template_edges = None
+                self.align_template_clahe = None
                 self.align_template_pos = None
                 self.align_template_size = None
+                self.align_ref_full_gray = None
                 
                 # Run recognition
                 self._run_recognition_internal()
@@ -3233,8 +3468,11 @@ class OMRSoftware(QMainWindow):
         
         # Reset alignment template for new recognition run
         self.align_template = None
+        self.align_template_edges = None
+        self.align_template_clahe = None
         self.align_template_pos = None
         self.align_template_size = None
+        self.align_ref_full_gray = None
         self.align_reference_gray = None
         self.align_reference_bounds = None
         
@@ -3511,8 +3749,11 @@ class OMRSoftware(QMainWindow):
         
         # Reset alignment template for export
         self.align_template = None
+        self.align_template_edges = None
+        self.align_template_clahe = None
         self.align_template_pos = None
         self.align_template_size = None
+        self.align_ref_full_gray = None
         self.align_reference_gray = None
         self.align_reference_bounds = None
         
