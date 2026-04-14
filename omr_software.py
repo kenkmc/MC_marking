@@ -31,7 +31,7 @@ from PyQt5.QtWidgets import (
     QGraphicsPixmapItem, QMenu, QAction, QDialogButtonBox, QAbstractItemView
 )
 from PyQt5.QtGui import QPixmap, QImage, QPen, QBrush, QColor, QPainter, QFont, QWheelEvent, QCursor, QDesktopServices
-from PyQt5.QtCore import Qt, QRectF, QPointF, QUrl, QObject, QEvent
+from PyQt5.QtCore import Qt, QRectF, QPointF, QUrl, QObject, QEvent, QThread, pyqtSignal, QSettings, QTimer
 import fitz  # PyMuPDF for PDF rendering
 import sys
 import json
@@ -47,13 +47,50 @@ from PIL import Image
 from openpyxl import Workbook
 from openpyxl.styles import Font as XLFont, Alignment, Border, Side
 
+import urllib.request
+
 # Mark types
 MARK_TYPE_TEXT = "text"      # Text field (e.g., student name, ID)
 MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
+
+# GitHub repo for update checks
+GITHUB_REPO = "kenkmc/MC_marking"
+
+
+class UpdateChecker(QThread):
+    """Background thread to check GitHub releases for updates."""
+    update_available = pyqtSignal(str, str)   # (latest_version, download_url)
+    no_update = pyqtSignal(str)               # current_version
+    check_failed = pyqtSignal(str)            # error_message
+
+    def run(self):
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "CheckMate-Updater"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            tag = data.get("tag_name", "").lstrip("vV")
+            html_url = data.get("html_url", "")
+            if self._is_newer(tag, APP_VERSION):
+                self.update_available.emit(tag, html_url)
+            else:
+                self.no_update.emit(APP_VERSION)
+        except Exception as e:
+            self.check_failed.emit(str(e))
+
+    @staticmethod
+    def _is_newer(remote: str, local: str) -> bool:
+        """Compare dotted version strings."""
+        try:
+            r_parts = [int(x) for x in remote.split(".")]
+            l_parts = [int(x) for x in local.split(".")]
+            return r_parts > l_parts
+        except ValueError:
+            return False
 
 # ── i18n Translation System ──
 _TRANSLATIONS = {
@@ -158,6 +195,16 @@ _TRANSLATIONS = {
         "field_student_no": "Student No.",
         "field_name": "Name",
         "col_page": "Page",
+        # Update checker
+        "menu_settings": "Settings",
+        "menu_check_update": "Check for Update",
+        "chk_auto_update": "Check for updates on startup",
+        "update_title": "Update Available",
+        "update_msg": "A new version of CheckMate is available!\n\nCurrent version: v{current}\nLatest version: v{latest}\n\nWould you like to open the download page?",
+        "update_no_update": "You are using the latest version (v{version}).",
+        "update_no_update_title": "No Update Available",
+        "update_check_failed": "Could not check for updates.\nPlease check your internet connection.",
+        "update_check_failed_title": "Update Check Failed",
     },
     "zh": {
         "app_title": "CheckMate – 全能批改系統",
@@ -260,6 +307,16 @@ _TRANSLATIONS = {
         "field_student_no": "學號",
         "field_name": "姓名",
         "col_page": "頁面",
+        # Update checker
+        "menu_settings": "設定",
+        "menu_check_update": "檢查更新",
+        "chk_auto_update": "啟動時自動檢查更新",
+        "update_title": "有可用更新",
+        "update_msg": "CheckMate 有新版本可用！\n\n目前版本：v{current}\n最新版本：v{latest}\n\n是否要開啟下載頁面？",
+        "update_no_update": "您已使用最新版本（v{version}）。",
+        "update_no_update_title": "沒有可用更新",
+        "update_check_failed": "無法檢查更新。\n請確認網路連線。",
+        "update_check_failed_title": "更新檢查失敗",
     }
 }
 
@@ -957,6 +1014,10 @@ class OMRSoftware(QMainWindow):
         self.debug_records = []
         self.student_absence = {}  # page_idx -> bool (True if absent)
         self.extra_students = []   # Extra student records beyond PDF pages
+
+        # Settings (persistent)
+        self._settings = QSettings("CheckMate", "CheckMate")
+        self._update_thread = None
 
         self.init_ui()
         
@@ -2070,8 +2131,20 @@ class OMRSoftware(QMainWindow):
             act_zh.triggered.connect(lambda: self._switch_language("zh"))
             lang_menu.addAction(act_zh)
         
+        # Settings menu
+        settings_menu = menubar.addMenu(tr("menu_settings"))
+        self.act_auto_update = QAction(tr("chk_auto_update"), self)
+        self.act_auto_update.setCheckable(True)
+        self.act_auto_update.setChecked(self._settings.value("check_update_on_startup", True, type=bool))
+        self.act_auto_update.triggered.connect(self._toggle_auto_update)
+        settings_menu.addAction(self.act_auto_update)
+
         # Help menu
         help_menu = menubar.addMenu(tr("menu_help"))
+        act_check_update = QAction(tr("menu_check_update"), self)
+        act_check_update.triggered.connect(lambda: self._check_for_update(silent=False))
+        help_menu.addAction(act_check_update)
+        help_menu.addSeparator()
         act_about = QAction(tr("menu_about"), self)
         act_about.triggered.connect(self.show_about)
         help_menu.addAction(act_about)
@@ -2385,6 +2458,48 @@ class OMRSoftware(QMainWindow):
         """Show About dialog with version information."""
         QMessageBox.about(self, tr("about_title"),
                           tr("about_text", version=APP_VERSION))
+
+    # ── Update Checker ──
+
+    def _toggle_auto_update(self, checked):
+        self._settings.setValue("check_update_on_startup", checked)
+
+    def _check_for_update(self, silent=True):
+        """Launch background update check.  silent=True suppresses 'no update' / 'failed' dialogs."""
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        self._update_silent = silent
+        self._update_thread = UpdateChecker()
+        self._update_thread.update_available.connect(self._on_update_available)
+        self._update_thread.no_update.connect(self._on_no_update)
+        self._update_thread.check_failed.connect(self._on_update_failed)
+        self._update_thread.start()
+
+    def _on_update_available(self, latest, url):
+        reply = QMessageBox.information(
+            self,
+            tr("update_title"),
+            tr("update_msg", current=APP_VERSION, latest=latest),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _on_no_update(self, version):
+        if not self._update_silent:
+            QMessageBox.information(self, tr("update_no_update_title"),
+                                    tr("update_no_update", version=version))
+
+    def _on_update_failed(self, error):
+        if not self._update_silent:
+            QMessageBox.warning(self, tr("update_check_failed_title"),
+                                tr("update_check_failed"))
+
+    def _startup_update_check(self):
+        """Called once after window is shown to check for updates."""
+        if self._settings.value("check_update_on_startup", True, type=bool):
+            self._check_for_update(silent=True)
 
     def set_marking(self, mtype):
         if mtype == MARK_TYPE_TEXT:
@@ -4536,4 +4651,5 @@ if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     window = OMRSoftware()
     window.show()
+    QTimer.singleShot(1500, window._startup_update_check)
     sys.exit(app.exec_())
