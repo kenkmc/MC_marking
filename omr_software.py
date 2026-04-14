@@ -31,7 +31,7 @@ from PyQt5.QtWidgets import (
     QGraphicsPixmapItem, QMenu, QAction, QDialogButtonBox, QAbstractItemView
 )
 from PyQt5.QtGui import QPixmap, QImage, QPen, QBrush, QColor, QPainter, QFont, QWheelEvent, QCursor, QDesktopServices
-from PyQt5.QtCore import Qt, QRectF, QPointF, QUrl
+from PyQt5.QtCore import Qt, QRectF, QPointF, QUrl, QObject, QEvent
 import fitz  # PyMuPDF for PDF rendering
 import sys
 import json
@@ -51,6 +51,239 @@ from openpyxl.styles import Font as XLFont, Alignment, Border, Side
 MARK_TYPE_TEXT = "text"      # Text field (e.g., student name, ID)
 MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
+
+# Version
+APP_VERSION = "1.2.0"
+
+# ── i18n Translation System ──
+_TRANSLATIONS = {
+    "en": {
+        "app_title": "CheckMate – The definitive OMR software",
+        "title_label": "CheckMate",
+        "group_file": "1. File & Setup",
+        "btn_import_pdf": "Import PDF",
+        "chk_first_key": "First page is Answer Key",
+        "chk_auto_deskew": "Auto-correct page skew",
+        "chk_auto_align": "Auto-align pages (shift)",
+        "group_marking": "2. Marking Tools",
+        "btn_mark_text": "Mark Text Field",
+        "btn_mark_option": "Mark Options",
+        "btn_mark_align": "📍 Mark Alignment Region",
+        "tip_mark_align": "Mark a reference region (e.g., a table corner) for aligning scanned pages",
+        "lbl_mark_hint1": "Right-click marks to Rename/Delete/Config",
+        "lbl_mark_hint2": "Click mark to select, then drag corners to resize",
+        "btn_undo": "↩ Undo",
+        "tip_undo": "Remove the last added mark",
+        "btn_clear": "Clear All",
+        "btn_load_template": "Load Template",
+        "btn_save_template": "Save Template",
+        "group_processing": "3. Processing",
+        "lbl_ocr_status": "OCR Status: {engine}",
+        "lbl_ocr_not_available": "Not Available",
+        "btn_recognize_all": "Recognize All Pages",
+        "btn_recognize_sel": "Re-recognize Selected Pages...",
+        "chk_export_images": "Include images with answers",
+        "btn_export_bundle": "Export Results (Excel + Images)",
+        "btn_export_excel": "Export to Excel",
+        "btn_student_info": "Student Info (Manual / Paste)",
+        "chk_include_summary": "Include summary analysis in Excel",
+        "chk_include_topics": "Include topic sheet/analysis in Excel",
+        "btn_set_topics": "Set Topics",
+        "btn_export_images": "Export Images with Answers",
+        "btn_export_debug": "Export Debug Folder",
+        "group_batch": "4. Batch Processing",
+        "btn_batch_same": "📁 Batch: Same Template",
+        "tip_batch_same": "Select one template and multiple PDFs to process",
+        "btn_batch_match": "📁 Batch: Match Template Names",
+        "tip_batch_match": "Select multiple PDFs. For each PDF, auto-load template with same name.\nExample: exam1.pdf uses exam1.json",
+        "btn_prev": "◀ Prev",
+        "btn_next": "Next ▶",
+        "lbl_page": "Page: {current}/{total}",
+        "lbl_zoom": "Zoom:",
+        "tip_zoom_in": "Zoom In (Ctrl+Scroll Up)",
+        "tip_zoom_out": "Zoom Out (Ctrl+Scroll Down)",
+        "tip_zoom_reset": "Reset Zoom",
+        "tip_zoom_fit": "Fit to Window",
+        "lbl_results": "<b>Results & Answer Key</b>",
+        "col_q": "Q",
+        "col_detected": "Detected",
+        "col_correct": "Correct",
+        "col_points": "Points",
+        "col_crop": "Crop",
+        "lbl_score": "Page Score: {score}",
+        "lbl_total": "Total: 0",
+        # Dialogs
+        "dlg_student_title": "Student Info (Manual / Paste)",
+        "dlg_student_hint": "Paste from Excel: rows = students, columns = fields (tab-separated).",
+        "dlg_student_absent": "Absent",
+        "btn_paste_clipboard": "Paste from Clipboard",
+        "dlg_topic_title": "Set Topics",
+        "dlg_topic_hint": "Paste from Excel: rows = questions, columns = Q, Topic (tab-separated).",
+        "col_question": "Question",
+        "col_topic": "Topic",
+        "dlg_recognize_title": "Re-recognize Pages",
+        "dlg_recognize_prompt": "Select pages to re-recognize:",
+        "dlg_recognize_all_pages": "All Pages",
+        "dlg_recognize_current": "Current Page Only",
+        "dlg_recognize_range": "Page Range (e.g. 1-3, 5):",
+        # Messages
+        "msg_no_pdf": "Please import a PDF first.",
+        "msg_no_marks": "No marks defined. Please mark regions first.",
+        "msg_no_results": "No results to export",
+        "msg_recognition_complete": "Processed {pages} pages.\nRecognized {options} option fields.",
+        "msg_recognition_title": "Recognition Complete",
+        "msg_clipboard_empty": "Clipboard is empty.",
+        "msg_no_questions": "No questions found to label.",
+        "msg_no_text_fields": "No text fields found or defined.",
+        "dlg_select_export_folder": "Select Export Location",
+        "progress_exporting": "Exporting...",
+        "progress_exporting_excel": "Exporting Excel...",
+        "progress_exporting_images": "Exporting image {current}/{total}...",
+        "msg_export_done": "Export complete!\nSaved to:\n{folder}",
+        "lbl_student_counts": "Pages scanned: {pages}  |  Students entered: {students}",
+        "lbl_page_absent": "(Absent)",
+        # About
+        "menu_help": "Help",
+        "menu_about": "About CheckMate",
+        "about_title": "About CheckMate",
+        "about_text": "CheckMate v{version}\n\nThe definitive OMR (Optical Mark Recognition) software.\n\nBuilt with PyQt5, OpenCV, PyMuPDF.\n\n© 2026",
+        # Language
+        "menu_language": "Language",
+        "lang_en": "English",
+        "lang_zh": "繁體中文",
+        # Alignment mark overlay
+        "align_overlay": "📍 Alignment Reference",
+        # Student info defaults
+        "field_class": "Class",
+        "field_student_no": "Student No.",
+        "field_name": "Name",
+        "col_page": "Page",
+    },
+    "zh": {
+        "app_title": "CheckMate – 全能批改系統",
+        "title_label": "CheckMate",
+        "group_file": "1. 檔案設定",
+        "btn_import_pdf": "匯入 PDF",
+        "chk_first_key": "第一頁為答案",
+        "chk_auto_deskew": "自動校正頁面歪斜",
+        "chk_auto_align": "自動對齊頁面（位移）",
+        "group_marking": "2. 標記工具",
+        "btn_mark_text": "標記文字欄",
+        "btn_mark_option": "標記選項",
+        "btn_mark_align": "📍 標記對齊區域",
+        "tip_mark_align": "標記參考區域（例如表格角落）以對齊掃描頁面",
+        "lbl_mark_hint1": "右鍵點擊標記可重新命名/刪除/設定",
+        "lbl_mark_hint2": "點選標記後拖曳角落可調整大小",
+        "btn_undo": "↩ 復原",
+        "tip_undo": "移除最後新增的標記",
+        "btn_clear": "全部清除",
+        "btn_load_template": "載入範本",
+        "btn_save_template": "儲存範本",
+        "group_processing": "3. 處理",
+        "lbl_ocr_status": "OCR 狀態：{engine}",
+        "lbl_ocr_not_available": "未找到",
+        "btn_recognize_all": "辨識所有頁面",
+        "btn_recognize_sel": "重新辨識選定頁面...",
+        "chk_export_images": "包含答案標註圖片",
+        "btn_export_bundle": "匯出結果（Excel + 圖片）",
+        "btn_export_excel": "匯出 Excel",
+        "btn_student_info": "學生資料（手動 / 貼上）",
+        "chk_include_summary": "Excel 中包含統計分析",
+        "chk_include_topics": "Excel 中包含課題分析",
+        "btn_set_topics": "設定課題",
+        "btn_export_images": "匯出答案圖片",
+        "btn_export_debug": "匯出偵錯資料夾",
+        "group_batch": "4. 批次處理",
+        "btn_batch_same": "📁 批次：相同範本",
+        "tip_batch_same": "選擇一個範本和多個 PDF 進行處理",
+        "btn_batch_match": "📁 批次：匹配範本名稱",
+        "tip_batch_match": "選擇多個 PDF。每個 PDF 自動載入同名範本。\n例如：exam1.pdf 使用 exam1.json",
+        "btn_prev": "◀ 上一頁",
+        "btn_next": "下一頁 ▶",
+        "lbl_page": "頁面：{current}/{total}",
+        "lbl_zoom": "縮放：",
+        "tip_zoom_in": "放大（Ctrl+滾輪向上）",
+        "tip_zoom_out": "縮小（Ctrl+滾輪向下）",
+        "tip_zoom_reset": "重設縮放",
+        "tip_zoom_fit": "適應視窗",
+        "lbl_results": "<b>結果及答案</b>",
+        "col_q": "題",
+        "col_detected": "偵測",
+        "col_correct": "正確",
+        "col_points": "分數",
+        "col_crop": "裁剪",
+        "lbl_score": "本頁分數：{score}",
+        "lbl_total": "總計：0",
+        # Dialogs
+        "dlg_student_title": "學生資料（手動 / 貼上）",
+        "dlg_student_hint": "從 Excel 貼上：列 = 學生，欄 = 各欄位（Tab 分隔）。",
+        "dlg_student_absent": "缺席",
+        "btn_paste_clipboard": "從剪貼簿貼上",
+        "dlg_topic_title": "設定課題",
+        "dlg_topic_hint": "從 Excel 貼上：列 = 題目，欄 = Q、課題（Tab 分隔）。",
+        "col_question": "題目",
+        "col_topic": "課題",
+        "dlg_recognize_title": "重新辨識頁面",
+        "dlg_recognize_prompt": "選擇要重新辨識的頁面：",
+        "dlg_recognize_all_pages": "所有頁面",
+        "dlg_recognize_current": "僅目前頁面",
+        "dlg_recognize_range": "頁碼範圍（例如 1-3, 5）：",
+        # Messages
+        "msg_no_pdf": "請先匯入 PDF。",
+        "msg_no_marks": "未定義標記。請先標記區域。",
+        "msg_no_results": "沒有可匯出的結果",
+        "msg_recognition_complete": "已處理 {pages} 頁。\n已辨識 {options} 個選項欄。",
+        "msg_recognition_title": "辨識完成",
+        "msg_clipboard_empty": "剪貼簿是空的。",
+        "msg_no_questions": "找不到題目。",
+        "msg_no_text_fields": "未找到或未定義文字欄位。",
+        "dlg_select_export_folder": "選擇匯出位置",
+        "progress_exporting": "匯出中...",
+        "progress_exporting_excel": "正在匯出 Excel...",
+        "progress_exporting_images": "正在匯出圖片 {current}/{total}...",
+        "msg_export_done": "匯出完成！\n已儲存至：\n{folder}",
+        "lbl_student_counts": "已掃描頁數：{pages}  |  已輸入學生數：{students}",
+        "lbl_page_absent": "（缺席）",
+        # About
+        "menu_help": "說明",
+        "menu_about": "關於 CheckMate",
+        "about_title": "關於 CheckMate",
+        "about_text": "CheckMate v{version}\n\n全能光學標記辨識（OMR）批改系統。\n\n使用 PyQt5、OpenCV、PyMuPDF 建構。\n\n© 2026",
+        # Language
+        "menu_language": "語言",
+        "lang_en": "English",
+        "lang_zh": "繁體中文",
+        # Alignment mark overlay
+        "align_overlay": "📍 對齊參考區域",
+        # Student info defaults
+        "field_class": "班別",
+        "field_student_no": "學號",
+        "field_name": "姓名",
+        "col_page": "頁面",
+    }
+}
+
+# Current language setting (default: English)
+_current_lang = "en"
+
+def tr(key, **kwargs):
+    """Get translated string for the current language."""
+    text = _TRANSLATIONS.get(_current_lang, _TRANSLATIONS["en"]).get(key)
+    if text is None:
+        text = _TRANSLATIONS["en"].get(key, key)
+    if kwargs:
+        text = text.format(**kwargs)
+    return text
+
+def set_language(lang):
+    """Set the application language ('en' or 'zh')."""
+    global _current_lang
+    if lang in _TRANSLATIONS:
+        _current_lang = lang
+
+def get_language():
+    """Get current language code."""
+    return _current_lang
 
 
 def deskew_image(img_array):
@@ -393,7 +626,7 @@ class MarkItem(QGraphicsRectItem):
             # Alignment reference - show label
             painter.setPen(QPen(QColor(0, 150, 0)))
             painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
-            display_text = "📍 對齊參考區域 (Alignment Reference)"
+            display_text = tr("align_overlay")
             if self.label:
                 display_text = f"📍 {self.label}"
             painter.drawText(rect, Qt.AlignCenter, display_text)
@@ -686,6 +919,20 @@ class MarkingView(QGraphicsView):
         pass # Logic handled in OMRSoftware class to avoid duplication
 
 
+class _TablePasteFilter(QObject):
+    """Event filter that intercepts Ctrl+V on a QTableWidget and calls a callback."""
+    def __init__(self, callback, parent=None):
+        super().__init__(parent)
+        self._callback = callback
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_V and (event.modifiers() & Qt.ControlModifier):
+                self._callback()
+                return True
+        return False
+
+
 class OMRSoftware(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -708,7 +955,9 @@ class OMRSoftware(QMainWindow):
         self.align_reference_size = None
         self.topic_map = {}
         self.debug_records = []
-        
+        self.student_absence = {}  # page_idx -> bool (True if absent)
+        self.extra_students = []   # Extra student records beyond PDF pages
+
         self.init_ui()
         
     def init_ocr(self):
@@ -996,13 +1245,19 @@ class OMRSoftware(QMainWindow):
             effective_confidence = min(1.0, best_val * 1.1)
         
         if effective_confidence < 0.35:
-            print(f"  Template align: Low confidence ({effective_confidence:.3f}), skipping")
+            print(f"  Template align: Low confidence ({effective_confidence:.3f}), trying phase correlation fallback...")
+            fallback_result = self._align_phase_correlation_fallback(img_np, gray, page_idx)
+            if fallback_result is not None:
+                return fallback_result
             return img_np, (0.0, 0.0), effective_confidence
         
         # Sanity check on shift magnitude
         max_allowed_shift = margin - 10
         if abs(dx) > max_allowed_shift or abs(dy) > max_allowed_shift:
-            print(f"  Template align: Shift ({dx:.2f},{dy:.2f}) exceeds ±{max_allowed_shift}, skipping")
+            print(f"  Template align: Shift ({dx:.2f},{dy:.2f}) exceeds ±{max_allowed_shift}, trying phase correlation fallback...")
+            fallback_result = self._align_phase_correlation_fallback(img_np, gray, page_idx)
+            if fallback_result is not None:
+                return fallback_result
             return img_np, (0.0, 0.0), 0.3
         
         # === Rotation detection and correction ===
@@ -1179,6 +1434,141 @@ class OMRSoftware(QMainWindow):
             return best_angle
         else:
             return 0.0
+
+    def _align_phase_correlation_fallback(self, img_np, gray, page_idx):
+        """
+        Fallback alignment using phase correlation on the alignment region
+        with a much larger search area. Used when template matching fails
+        (shift too large or confidence too low).
+        
+        Strategy:
+        1. Use phase correlation on the full page to detect gross translation.
+        2. Then refine with template matching on the alignment region using the
+           corrected position.
+        """
+        if not hasattr(self, 'align_ref_full_gray') or self.align_ref_full_gray is None:
+            return None
+        
+        h, w = img_np.shape[:2]
+        ref_gray = self.align_ref_full_gray
+        rh, rw = ref_gray.shape[:2]
+        
+        # Make both images the same size for phase correlation
+        common_h = min(h, rh)
+        common_w = min(w, rw)
+        
+        if common_h < 100 or common_w < 100:
+            return None
+        
+        ref_crop = ref_gray[:common_h, :common_w].astype(np.float64)
+        cur_crop = gray[:common_h, :common_w].astype(np.float64)
+        
+        # Apply window function to reduce edge effects
+        hann_rows = np.hanning(common_h)
+        hann_cols = np.hanning(common_w)
+        window = np.outer(hann_rows, hann_cols)
+        
+        ref_windowed = ref_crop * window
+        cur_windowed = cur_crop * window
+        
+        # Phase correlation
+        f_ref = np.fft.fft2(ref_windowed)
+        f_cur = np.fft.fft2(cur_windowed)
+        
+        cross_power = (f_ref * np.conj(f_cur))
+        denom = np.abs(cross_power)
+        denom[denom < 1e-10] = 1e-10
+        cross_power_norm = cross_power / denom
+        
+        correlation = np.fft.ifft2(cross_power_norm).real
+        
+        # Find peak
+        max_loc = np.unravel_index(np.argmax(correlation), correlation.shape)
+        peak_y, peak_x = max_loc
+        
+        # Convert to signed shift (handle wrap-around)
+        if peak_y > common_h // 2:
+            peak_y -= common_h
+        if peak_x > common_w // 2:
+            peak_x -= common_w
+        
+        dx = float(peak_x)
+        dy = float(peak_y)
+        
+        # Check peak strength (ratio of peak to mean)
+        peak_val = correlation[max_loc]
+        mean_val = np.mean(np.abs(correlation))
+        peak_ratio = peak_val / max(mean_val, 1e-10)
+        
+        print(f"  Phase correlation fallback: shift=({dx:.1f},{dy:.1f}), peak_ratio={peak_ratio:.1f}")
+        
+        # Reject if peak ratio is too low (unreliable)
+        if peak_ratio < 3.0:
+            print(f"  Phase correlation: Peak ratio too low ({peak_ratio:.1f}), skipping")
+            return None
+        
+        # Reject implausible shifts (more than 20% of image dimension)
+        if abs(dx) > w * 0.2 or abs(dy) > h * 0.2:
+            print(f"  Phase correlation: Shift too large ({dx:.1f},{dy:.1f}), skipping")
+            return None
+        
+        # Skip negligible shifts
+        if abs(dx) < 1.0 and abs(dy) < 1.0:
+            return None
+        
+        # Apply the correction
+        if len(img_np.shape) == 3:
+            border_value = (255, 255, 255)
+        else:
+            border_value = 255
+        
+        M = np.float32([[1, 0, dx], [0, 1, dy]])
+        aligned = cv2.warpAffine(img_np, M, (w, h),
+                                  flags=cv2.INTER_LINEAR,
+                                  borderMode=cv2.BORDER_CONSTANT,
+                                  borderValue=border_value)
+        
+        # Verify the correction by re-matching template in the corrected image
+        confidence = self._verify_alignment_quality(aligned, page_idx)
+        
+        if confidence < 0.3:
+            print(f"  Phase correlation: Verification failed (conf={confidence:.3f}), skipping")
+            return None
+        
+        print(f"  Phase correlation: ✓ Applied dx={dx:.1f}, dy={dy:.1f} (verified conf={confidence:.3f})")
+        return aligned, (dx, dy), confidence
+
+    def _verify_alignment_quality(self, aligned_img, page_idx):
+        """Verify alignment quality by matching template in the corrected image."""
+        if not hasattr(self, 'align_template') or self.align_template is None:
+            return 0.5
+        
+        if len(aligned_img.shape) == 3:
+            gray = cv2.cvtColor(aligned_img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = aligned_img.copy()
+        
+        ref_x, ref_y = self.align_template_pos
+        ref_w, ref_h = self.align_template_size
+        
+        # Small search region around expected position
+        margin = 30
+        h, w = gray.shape[:2]
+        sx1 = max(0, ref_x - margin)
+        sy1 = max(0, ref_y - margin)
+        sx2 = min(w, ref_x + ref_w + margin)
+        sy2 = min(h, ref_y + ref_h + margin)
+        
+        search_region = gray[sy1:sy2, sx1:sx2]
+        template_h, template_w = self.align_template.shape[:2]
+        
+        if search_region.shape[0] < template_h or search_region.shape[1] < template_w:
+            return 0.0
+        
+        result = cv2.matchTemplate(search_region, self.align_template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+        
+        return max_val
     
     def _find_table_bounds(self, img_np):
         """
@@ -1662,8 +2052,29 @@ class OMRSoftware(QMainWindow):
         return "OCR Error: No Engine"
 
     def init_ui(self):
-        self.setWindowTitle("CheckMate – The definitive OMR software")
+        self.setWindowTitle(f"{tr('app_title')}  v{APP_VERSION}")
         self.setGeometry(100, 100, 1400, 850)
+        
+        # --- Menu Bar ---
+        menubar = self.menuBar()
+        menubar.clear()
+        
+        # Language menu — only show the option to switch to the OTHER language
+        lang_menu = menubar.addMenu(tr("menu_language"))
+        if get_language() != "en":
+            act_en = QAction(tr("lang_en"), self)
+            act_en.triggered.connect(lambda: self._switch_language("en"))
+            lang_menu.addAction(act_en)
+        if get_language() != "zh":
+            act_zh = QAction(tr("lang_zh"), self)
+            act_zh.triggered.connect(lambda: self._switch_language("zh"))
+            lang_menu.addAction(act_zh)
+        
+        # Help menu
+        help_menu = menubar.addMenu(tr("menu_help"))
+        act_about = QAction(tr("menu_about"), self)
+        act_about.triggered.connect(self.show_about)
+        help_menu.addAction(act_about)
         
         central = QWidget()
         self.setCentralWidget(central)
@@ -1680,43 +2091,43 @@ class OMRSoftware(QMainWindow):
         left_layout.setSpacing(15)
         
         # Title
-        title = QLabel("CheckMate")
+        title = QLabel(tr("title_label"))
         title.setObjectName("titleLabel")
         left_layout.addWidget(title)
         
         # File Import
-        file_grp = QGroupBox("1. File & Setup")
+        file_grp = QGroupBox(tr("group_file"))
         f_layout = QVBoxLayout(file_grp)
         
-        btn_import = QPushButton("Import PDF")
+        btn_import = QPushButton(tr("btn_import_pdf"))
         btn_import.clicked.connect(self.import_pdf)
         f_layout.addWidget(btn_import)
         
-        self.check_first_key = QCheckBox("First page is Answer Key")
+        self.check_first_key = QCheckBox(tr("chk_first_key"))
         self.check_first_key.stateChanged.connect(lambda s: setattr(self, 'first_page_key', s == Qt.Checked))
         f_layout.addWidget(self.check_first_key)
         
-        self.check_auto_deskew = QCheckBox("Auto-correct page skew")
-        self.check_auto_deskew.setChecked(True)  # Enable by default
+        self.check_auto_deskew = QCheckBox(tr("chk_auto_deskew"))
+        self.check_auto_deskew.setChecked(False)
         f_layout.addWidget(self.check_auto_deskew)
 
-        self.check_auto_align = QCheckBox("Auto-align pages (shift)")
-        self.check_auto_align.setChecked(True)  # Enable by default
+        self.check_auto_align = QCheckBox(tr("chk_auto_align"))
+        self.check_auto_align.setChecked(False)
         f_layout.addWidget(self.check_auto_align)
         
         left_layout.addWidget(file_grp)
         
         # Marking Tools
-        mark_grp = QGroupBox("2. Marking Tools")
+        mark_grp = QGroupBox(tr("group_marking"))
         m_layout = QVBoxLayout(mark_grp)
         
         row1 = QHBoxLayout()
-        self.btn_mark_text = QPushButton("Mark Text Field")
+        self.btn_mark_text = QPushButton(tr("btn_mark_text"))
         self.btn_mark_text.setCheckable(True)
         self.btn_mark_text.clicked.connect(lambda: self.set_marking(MARK_TYPE_TEXT))
         row1.addWidget(self.btn_mark_text)
         
-        self.btn_mark_option = QPushButton("Mark Options")
+        self.btn_mark_option = QPushButton(tr("btn_mark_option"))
         self.btn_mark_option.setCheckable(True)
         self.btn_mark_option.clicked.connect(lambda: self.set_marking(MARK_TYPE_OPTION))
         row1.addWidget(self.btn_mark_option)
@@ -1724,32 +2135,32 @@ class OMRSoftware(QMainWindow):
         
         # Alignment reference button
         row1_5 = QHBoxLayout()
-        self.btn_mark_align = QPushButton("📍 Mark Alignment Region")
+        self.btn_mark_align = QPushButton(tr("btn_mark_align"))
         self.btn_mark_align.setCheckable(True)
-        self.btn_mark_align.setToolTip("Mark a reference region (e.g., a table corner) for aligning scanned pages")
+        self.btn_mark_align.setToolTip(tr("tip_mark_align"))
         self.btn_mark_align.clicked.connect(lambda: self.set_marking(MARK_TYPE_ALIGN))
         row1_5.addWidget(self.btn_mark_align)
         m_layout.addLayout(row1_5)
         
-        m_layout.addWidget(QLabel("Right-click marks to Rename/Delete/Config"))
-        m_layout.addWidget(QLabel("Click mark to select, then drag corners to resize"))
+        m_layout.addWidget(QLabel(tr("lbl_mark_hint1")))
+        m_layout.addWidget(QLabel(tr("lbl_mark_hint2")))
         
         row2 = QHBoxLayout()
-        btn_undo = QPushButton("↩ Undo")
-        btn_undo.setToolTip("Remove the last added mark")
+        btn_undo = QPushButton(tr("btn_undo"))
+        btn_undo.setToolTip(tr("tip_undo"))
         btn_undo.clicked.connect(self.undo_last_mark)
         row2.addWidget(btn_undo)
         
-        btn_clear = QPushButton("Clear All")
+        btn_clear = QPushButton(tr("btn_clear"))
         btn_clear.setObjectName("deleteBtn")
         btn_clear.clicked.connect(self.clear_all_marks)
         row2.addWidget(btn_clear)
         m_layout.addLayout(row2)
         
         row3 = QHBoxLayout()
-        btn_import_templ = QPushButton("Load Template")
+        btn_import_templ = QPushButton(tr("btn_load_template"))
         btn_import_templ.clicked.connect(self.import_template)
-        btn_export_templ = QPushButton("Save Template")
+        btn_export_templ = QPushButton(tr("btn_save_template"))
         btn_export_templ.clicked.connect(self.export_template)
         row3.addWidget(btn_import_templ)
         row3.addWidget(btn_export_templ)
@@ -1758,65 +2169,70 @@ class OMRSoftware(QMainWindow):
         left_layout.addWidget(mark_grp)
         
         # Processing
-        proc_grp = QGroupBox("3. Processing")
+        proc_grp = QGroupBox(tr("group_processing"))
         p_layout = QVBoxLayout(proc_grp)
         
-        lbl_ocr = QLabel(f"OCR Status: {self.ocr_engine_name if self.ocr_engine_name else 'Not Available'}")
+        engine_name = self.ocr_engine_name if self.ocr_engine_name else tr("lbl_ocr_not_available")
+        lbl_ocr = QLabel(tr("lbl_ocr_status", engine=engine_name))
         p_layout.addWidget(lbl_ocr)
         
-        btn_process = QPushButton("Recognize All Pages")
+        btn_process = QPushButton(tr("btn_recognize_all"))
         btn_process.clicked.connect(self.run_recognition_all)
         p_layout.addWidget(btn_process)
 
-        self.check_export_images = QCheckBox("Include images with answers")
+        btn_rerecognize = QPushButton(tr("btn_recognize_sel"))
+        btn_rerecognize.clicked.connect(self.run_recognition_selected)
+        p_layout.addWidget(btn_rerecognize)
+
+        self.check_export_images = QCheckBox(tr("chk_export_images"))
         self.check_export_images.setChecked(True)
         p_layout.addWidget(self.check_export_images)
 
-        btn_export_all = QPushButton("Export Results (Excel + Images)")
+        btn_export_all = QPushButton(tr("btn_export_bundle"))
         btn_export_all.clicked.connect(self.export_results_bundle)
         p_layout.addWidget(btn_export_all)
         
-        btn_export = QPushButton("Export to Excel")
+        btn_export = QPushButton(tr("btn_export_excel"))
         btn_export.clicked.connect(self.export_excel)
         p_layout.addWidget(btn_export)
 
-        btn_student_info = QPushButton("Student Info (Manual / Paste)")
+        btn_student_info = QPushButton(tr("btn_student_info"))
         btn_student_info.clicked.connect(self.edit_student_info)
         p_layout.addWidget(btn_student_info)
 
-        self.check_include_summary = QCheckBox("Include summary analysis in Excel")
+        self.check_include_summary = QCheckBox(tr("chk_include_summary"))
         self.check_include_summary.setChecked(True)
         p_layout.addWidget(self.check_include_summary)
 
-        self.check_include_topics = QCheckBox("Include topic sheet/analysis in Excel")
+        self.check_include_topics = QCheckBox(tr("chk_include_topics"))
         self.check_include_topics.setChecked(True)
         p_layout.addWidget(self.check_include_topics)
 
-        btn_topics = QPushButton("Set Topics")
+        btn_topics = QPushButton(tr("btn_set_topics"))
         btn_topics.clicked.connect(self.edit_topics)
         p_layout.addWidget(btn_topics)
         
-        btn_export_img = QPushButton("Export Images with Answers")
+        btn_export_img = QPushButton(tr("btn_export_images"))
         btn_export_img.clicked.connect(self.export_images)
         p_layout.addWidget(btn_export_img)
 
-        btn_export_debug = QPushButton("Export Debug Folder")
+        btn_export_debug = QPushButton(tr("btn_export_debug"))
         btn_export_debug.clicked.connect(self.export_debug_pack)
         p_layout.addWidget(btn_export_debug)
         
         left_layout.addWidget(proc_grp)
         
         # Batch Processing
-        batch_grp = QGroupBox("4. Batch Processing")
+        batch_grp = QGroupBox(tr("group_batch"))
         b_layout = QVBoxLayout(batch_grp)
         
-        btn_batch_same = QPushButton("📁 Batch: Same Template")
-        btn_batch_same.setToolTip("Select one template and multiple PDFs to process")
+        btn_batch_same = QPushButton(tr("btn_batch_same"))
+        btn_batch_same.setToolTip(tr("tip_batch_same"))
         btn_batch_same.clicked.connect(self.batch_process_same_template)
         b_layout.addWidget(btn_batch_same)
         
-        btn_batch_match = QPushButton("📁 Batch: Match Template Names")
-        btn_batch_match.setToolTip("Select multiple PDFs. For each PDF, auto-load template with same name.\nExample: exam1.pdf uses exam1.json")
+        btn_batch_match = QPushButton(tr("btn_batch_match"))
+        btn_batch_match.setToolTip(tr("tip_batch_match"))
         btn_batch_match.clicked.connect(self.batch_process_matched_templates)
         b_layout.addWidget(btn_batch_match)
         
@@ -1831,31 +2247,31 @@ class OMRSoftware(QMainWindow):
         
         # Toolbar with navigation and zoom
         nav_layout = QHBoxLayout()
-        btn_prev = QPushButton("◀ Prev")
+        btn_prev = QPushButton(tr("btn_prev"))
         btn_prev.clicked.connect(self.prev_page)
-        btn_next = QPushButton("Next ▶")
+        btn_next = QPushButton(tr("btn_next"))
         btn_next.clicked.connect(self.next_page)
-        self.lbl_page = QLabel("Page: 0/0")
+        self.lbl_page = QLabel(tr("lbl_page", current=0, total=0))
         
         # Zoom controls
         btn_zoom_in = QPushButton("🔍+")
         btn_zoom_in.setFixedWidth(40)
-        btn_zoom_in.setToolTip("Zoom In (Ctrl+Scroll Up)")
+        btn_zoom_in.setToolTip(tr("tip_zoom_in"))
         btn_zoom_in.clicked.connect(lambda: self.view.zoom_in())
         
         btn_zoom_out = QPushButton("🔍-")
         btn_zoom_out.setFixedWidth(40)
-        btn_zoom_out.setToolTip("Zoom Out (Ctrl+Scroll Down)")
+        btn_zoom_out.setToolTip(tr("tip_zoom_out"))
         btn_zoom_out.clicked.connect(lambda: self.view.zoom_out())
         
         btn_zoom_reset = QPushButton("100%")
         btn_zoom_reset.setFixedWidth(50)
-        btn_zoom_reset.setToolTip("Reset Zoom")
+        btn_zoom_reset.setToolTip(tr("tip_zoom_reset"))
         btn_zoom_reset.clicked.connect(lambda: self.view.zoom_reset())
         
         btn_zoom_fit = QPushButton("Fit")
         btn_zoom_fit.setFixedWidth(40)
-        btn_zoom_fit.setToolTip("Fit to Window")
+        btn_zoom_fit.setToolTip(tr("tip_zoom_fit"))
         btn_zoom_fit.clicked.connect(lambda: self.view.zoom_fit())
         
         nav_layout.addWidget(btn_prev)
@@ -1869,7 +2285,7 @@ class OMRSoftware(QMainWindow):
         nav_layout.addWidget(self.lbl_correction)
         nav_layout.addStretch()
         
-        nav_layout.addWidget(QLabel("Zoom:"))
+        nav_layout.addWidget(QLabel(tr("lbl_zoom")))
         nav_layout.addWidget(btn_zoom_out)
         nav_layout.addWidget(btn_zoom_reset)
         nav_layout.addWidget(btn_zoom_in)
@@ -1888,11 +2304,11 @@ class OMRSoftware(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_widget.setFixedWidth(350)
         
-        right_layout.addWidget(QLabel("<b>Results & Answer Key</b>"))
+        right_layout.addWidget(QLabel(tr("lbl_results")))
         
         self.table = QTableWidget()
         self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Q", "Detected", "Correct", "Points", "Crop"])
+        self.table.setHorizontalHeaderLabels([tr("col_q"), tr("col_detected"), tr("col_correct"), tr("col_points"), tr("col_crop")])
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.table.cellChanged.connect(self.on_table_edit)
         self.table.cellClicked.connect(self.open_crop_from_table)
@@ -1900,10 +2316,75 @@ class OMRSoftware(QMainWindow):
         self.table.customContextMenuRequested.connect(self.open_crop_context_menu)
         right_layout.addWidget(self.table)
         
-        self.lbl_score = QLabel("Total: 0")
+        self.lbl_score = QLabel(tr("lbl_total"))
         right_layout.addWidget(self.lbl_score)
         
         layout.addWidget(right_widget)
+
+    def _switch_language(self, lang):
+        """Switch UI language and rebuild the interface."""
+        set_language(lang)
+        # Save state
+        saved_pdf = getattr(self, 'pdf_document', None)
+        saved_page = getattr(self, 'current_page', 0)
+        saved_results = getattr(self, 'results', {})
+        saved_answer_key = getattr(self, 'answer_key', {})
+        saved_topic_map = getattr(self, 'topic_map', {})
+        saved_first_page_key = getattr(self, 'first_page_key', False)
+        saved_marks_data = None
+        if hasattr(self, 'view'):
+            saved_marks_data = self.view.get_all_marks_data()
+        saved_pdf_path = getattr(self, 'pdf_path', None)
+        saved_page_offsets = getattr(self, 'page_offsets', {})
+        saved_student_absence = getattr(self, 'student_absence', {})
+        saved_extra_students = getattr(self, 'extra_students', [])
+        
+        # Rebuild UI
+        self.init_ui()
+        self.setStyleSheet(STYLE_SHEET)
+        
+        # Restore state
+        self.results = saved_results
+        self.answer_key = saved_answer_key
+        self.topic_map = saved_topic_map
+        self.first_page_key = saved_first_page_key
+        self.check_first_key.setChecked(saved_first_page_key)
+        self.page_offsets = saved_page_offsets
+        self.student_absence = saved_student_absence
+        self.extra_students = saved_extra_students
+        
+        if saved_pdf is not None:
+            self.pdf_document = saved_pdf
+            self.pdf_path = saved_pdf_path
+            # Restore marks
+            if saved_marks_data:
+                self.clear_all_marks()
+                for m in saved_marks_data.get("text_marks", []):
+                    item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_TEXT, m['question'], m['label'], view_ref=self.view)
+                    item.setPos(m['x'], m['y'])
+                    self.view.text_marks.append(item)
+                    self.scene.addItem(item)
+                    self.view.text_counter = max(self.view.text_counter, m['question'] + 1)
+                for m in saved_marks_data.get("option_marks", []):
+                    item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_OPTION, m['question'], m['label'], m.get('options_count', 4), view_ref=self.view)
+                    item.setPos(m['x'], m['y'])
+                    self.view.option_marks.append(item)
+                    self.scene.addItem(item)
+                    self.view.option_counter = max(self.view.option_counter, m['question'] + 1)
+                align_data = saved_marks_data.get("align_mark")
+                if align_data:
+                    item = MarkItem(0, 0, align_data['width'], align_data['height'], MARK_TYPE_ALIGN,
+                                   align_data.get('question', 1), align_data.get('label', ''), view_ref=self.view)
+                    item.setPos(align_data['x'], align_data['y'])
+                    self.view.align_mark = item
+                    self.scene.addItem(item)
+            self.load_page(saved_page, apply_corrections=False)
+            self.update_result_table()
+
+    def show_about(self):
+        """Show About dialog with version information."""
+        QMessageBox.about(self, tr("about_title"),
+                          tr("about_text", version=APP_VERSION))
 
     def set_marking(self, mtype):
         if mtype == MARK_TYPE_TEXT:
@@ -1968,6 +2449,34 @@ class OMRSoftware(QMainWindow):
         image.save(path)
         return path
 
+    def _get_page_filename(self, page_idx):
+        """Return a filename stem (no extension) for the exported image of page_idx.
+        - Answer key page → 'answer_key'
+        - Pages with class + student number → 'CLASS_STUDENTNO' (e.g. '4A_01')
+        - Fallback → 'page_001'
+        """
+        if self.first_page_key and page_idx == 0:
+            return "answer_key"
+        text_data = {}
+        if hasattr(self, 'results') and page_idx in self.results:
+            text_data = self.results[page_idx].get("text", {})
+        # Locate class and student-number values using all known label variants
+        class_keys = [tr("field_class"), "班別", "Class"]
+        student_keys = [tr("field_student_no"), "學號", "Student No."]
+        class_val = next((text_data[k].strip() for k in class_keys if text_data.get(k, "").strip()), "")
+        student_no = next((text_data[k].strip() for k in student_keys if text_data.get(k, "").strip()), "")
+        if class_val and student_no:
+            raw = f"{class_val}_{student_no}"
+        elif class_val:
+            raw = class_val
+        elif student_no:
+            raw = student_no
+        else:
+            return f"page_{page_idx + 1:03d}"
+        # Sanitise for use as a filesystem name
+        safe = re.sub(r'[\\/:*?"<>|\s]+', '_', raw).strip('_')
+        return safe if safe else f"page_{page_idx + 1:03d}"
+
     def _get_all_questions(self):
         questions = set()
         if hasattr(self, "view") and getattr(self.view, "option_marks", None):
@@ -1986,7 +2495,7 @@ class OMRSoftware(QMainWindow):
             if val and val not in labels:
                 labels.append(val)
 
-        for default_label in ["班別", "學號", "姓名"]:
+        for default_label in [tr("field_class"), tr("field_student_no"), tr("field_name")]:
             add_label(default_label)
 
         if hasattr(self, "view") and getattr(self.view, "text_marks", None):
@@ -2020,26 +2529,32 @@ class OMRSoftware(QMainWindow):
 
     def edit_student_info(self):
         if not self.pdf_document:
-            QMessageBox.warning(self, "Student Info", "Please import a PDF first.")
+            QMessageBox.warning(self, tr("dlg_student_title"), tr("msg_no_pdf"))
             return
 
         self._ensure_results_for_pages()
         labels = self._get_text_field_labels()
 
         if not labels:
-            QMessageBox.information(self, "Student Info", "No text fields found or defined.")
+            QMessageBox.information(self, tr("dlg_student_title"), tr("msg_no_text_fields"))
             return
 
+        # Ensure student_absence dict exists
+        if not hasattr(self, 'student_absence'):
+            self.student_absence = {}
+
         dialog = QDialog(self)
-        dialog.setWindowTitle("Student Info (Manual / Paste)")
-        dialog.resize(700, 500)
+        dialog.setWindowTitle(tr("dlg_student_title"))
+        dialog.resize(800, 500)
         layout = QVBoxLayout(dialog)
 
-        layout.addWidget(QLabel("Paste from Excel: rows = students, columns = 姓名/班別/學號... (tab-separated)."))
+        layout.addWidget(QLabel(tr("dlg_student_hint")))
 
+        # Columns: Page, [fields...], Absent
+        absent_label = tr("dlg_student_absent")
         table = QTableWidget()
-        table.setColumnCount(1 + len(labels))
-        table.setHorizontalHeaderLabels(["Page"] + labels)
+        table.setColumnCount(1 + len(labels) + 1)  # +1 for Absent column
+        table.setHorizontalHeaderLabels([tr("col_page")] + labels + [absent_label])
         table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         table.setEditTriggers(QAbstractItemView.AllEditTriggers)
 
@@ -2061,10 +2576,37 @@ class OMRSoftware(QMainWindow):
                 val = page_texts.get(label, "")
                 table.setItem(row, col, QTableWidgetItem(str(val)))
 
+            # Absent checkbox
+            absent_col = 1 + len(labels)
+            absent_item = QTableWidgetItem()
+            absent_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            absent_item.setCheckState(Qt.Checked if self.student_absence.get(p_idx, False) else Qt.Unchecked)
+            table.setItem(row, absent_col, absent_item)
+
         layout.addWidget(table)
 
+        # Status label showing counts
+        count_label = QLabel()
+        count_label.setStyleSheet("color: #555; font-size: 12px; padding: 2px;")
+        layout.addWidget(count_label)
+
+        def _update_counts():
+            num_pages = len(page_indices)
+            # Count students: rows that have at least one non-empty text field
+            num_students = 0
+            for r in range(table.rowCount()):
+                for c in range(1, 1 + len(labels)):
+                    item = table.item(r, c)
+                    if item and item.text().strip():
+                        num_students += 1
+                        break
+            count_label.setText(tr("lbl_student_counts", pages=num_pages, students=num_students))
+
+        _update_counts()
+        table.cellChanged.connect(lambda row, col: _update_counts())
+
         btn_row = QHBoxLayout()
-        btn_paste = QPushButton("Paste from Clipboard")
+        btn_paste = QPushButton(tr("btn_paste_clipboard"))
         btn_row.addWidget(btn_paste)
         btn_row.addStretch()
         layout.addLayout(btn_row)
@@ -2072,10 +2614,26 @@ class OMRSoftware(QMainWindow):
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         layout.addWidget(buttons)
 
+        absent_col = 1 + len(labels)
+
+        def _add_extra_row(checked=True):
+            """Append a new empty row to the table (no real PDF page)."""
+            new_row = table.rowCount()
+            table.insertRow(new_row)
+            page_item = QTableWidgetItem("-")
+            page_item.setFlags(Qt.ItemIsEnabled)
+            table.setItem(new_row, 0, page_item)
+            for c in range(1, absent_col):
+                table.setItem(new_row, c, QTableWidgetItem(""))
+            abs_item = QTableWidgetItem()
+            abs_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            abs_item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+            table.setItem(new_row, absent_col, abs_item)
+
         def paste_from_clipboard():
             text = QtWidgets.QApplication.clipboard().text()
             if not text.strip():
-                QMessageBox.information(self, "Paste", "Clipboard is empty.")
+                QMessageBox.information(dialog, tr("dlg_student_title"), tr("msg_clipboard_empty"))
                 return
 
             rows = [r for r in text.splitlines() if r.strip() != ""]
@@ -2085,8 +2643,9 @@ class OMRSoftware(QMainWindow):
 
             for r_idx, line in enumerate(rows):
                 tgt_row = start_row + r_idx
-                if tgt_row >= table.rowCount():
-                    break
+                # Auto-add rows when paste exceeds current row count
+                while tgt_row >= table.rowCount():
+                    _add_extra_row(checked=True)
                 cols = line.split("\t")
                 for c_idx, val in enumerate(cols):
                     if c_idx >= len(labels):
@@ -2095,13 +2654,37 @@ class OMRSoftware(QMainWindow):
 
         def accept():
             self._ensure_results_for_pages()
+            # Save real pages
             for row, p_idx in enumerate(page_indices):
                 page_texts = self.results[p_idx].setdefault("text", {})
                 for col, label in enumerate(labels, start=1):
                     item = table.item(row, col)
-                    page_texts[label] = item.text().strip() if item else ""
+                    val = item.text().strip() if item else ""
+                    if val:
+                        page_texts[label] = val
+                    elif label in page_texts:
+                        page_texts[label] = ""
+                # Save absence status
+                abs_item = table.item(row, absent_col)
+                self.student_absence[p_idx] = (abs_item.checkState() == Qt.Checked) if abs_item else False
+            # Save extra rows (beyond actual PDF pages)
+            extra = []
+            for row in range(len(page_indices), table.rowCount()):
+                rec = {"text": {}, "absent": True}
+                for col, label in enumerate(labels, start=1):
+                    item = table.item(row, col)
+                    rec["text"][label] = item.text().strip() if item else ""
+                abs_item = table.item(row, absent_col)
+                rec["absent"] = (abs_item.checkState() == Qt.Checked) if abs_item else True
+                extra.append(rec)
+            self.extra_students = extra
             dialog.accept()
             self.update_result_table()
+
+        # Use event filter for reliable Ctrl+V interception
+        _pf = _TablePasteFilter(paste_from_clipboard, table)
+        table.installEventFilter(_pf)
+        table._paste_filter_ref = _pf  # Prevent GC
 
         btn_paste.clicked.connect(paste_from_clipboard)
         buttons.accepted.connect(accept)
@@ -2112,19 +2695,22 @@ class OMRSoftware(QMainWindow):
     def edit_topics(self):
         questions = self._get_all_questions()
         if not questions:
-            QMessageBox.information(self, "Topics", "No questions found to label.")
+            QMessageBox.information(self, tr("dlg_topic_title"), tr("msg_no_questions"))
             return
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Set Topics")
-        dialog.resize(400, 500)
+        dialog.setWindowTitle(tr("dlg_topic_title"))
+        dialog.resize(500, 500)
         layout = QVBoxLayout(dialog)
+
+        layout.addWidget(QLabel(tr("dlg_topic_hint")))
 
         table = QTableWidget()
         table.setColumnCount(2)
-        table.setHorizontalHeaderLabels(["Question", "Topic"])
+        table.setHorizontalHeaderLabels([tr("col_question"), tr("col_topic")])
         table.setRowCount(len(questions))
         table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        table.setEditTriggers(QAbstractItemView.AllEditTriggers)
 
         for row, q in enumerate(questions):
             q_item = QTableWidgetItem(f"Q{q}")
@@ -2135,8 +2721,37 @@ class OMRSoftware(QMainWindow):
 
         layout.addWidget(table)
 
+        btn_row = QHBoxLayout()
+        btn_paste = QPushButton(tr("btn_paste_clipboard"))
+        btn_row.addWidget(btn_paste)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         layout.addWidget(buttons)
+
+        def paste_from_clipboard():
+            text = QtWidgets.QApplication.clipboard().text()
+            if not text.strip():
+                QMessageBox.information(dialog, tr("dlg_topic_title"), tr("msg_clipboard_empty"))
+                return
+
+            rows_data = [r for r in text.splitlines() if r.strip() != ""]
+            start_row = table.currentRow()
+            if start_row < 0:
+                start_row = 0
+
+            for r_idx, line in enumerate(rows_data):
+                tgt_row = start_row + r_idx
+                if tgt_row >= table.rowCount():
+                    break
+                cols = line.split("\t")
+                # If only one column, it's the topic name
+                if len(cols) == 1:
+                    table.setItem(tgt_row, 1, QTableWidgetItem(cols[0].strip()))
+                elif len(cols) >= 2:
+                    # Two columns: skip Q column (col 0 is read-only), paste topic
+                    table.setItem(tgt_row, 1, QTableWidgetItem(cols[-1].strip()))
 
         def accept():
             new_map = {}
@@ -2146,6 +2761,12 @@ class OMRSoftware(QMainWindow):
             self.topic_map = new_map
             dialog.accept()
 
+        # Use event filter for reliable Ctrl+V interception
+        _pf2 = _TablePasteFilter(paste_from_clipboard, table)
+        table.installEventFilter(_pf2)
+        table._paste_filter_ref = _pf2  # Prevent GC
+
+        btn_paste.clicked.connect(paste_from_clipboard)
         buttons.accepted.connect(accept)
         buttons.rejected.connect(dialog.reject)
 
@@ -2159,7 +2780,7 @@ class OMRSoftware(QMainWindow):
             self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
             
         self.current_page = p_idx
-        self.lbl_page.setText(f"Page: {p_idx+1}/{len(self.pdf_document)}")
+        self.lbl_page.setText(tr("lbl_page", current=p_idx+1, total=len(self.pdf_document)))
         
         # Render PDF
         page = self.pdf_document[p_idx]
@@ -2345,10 +2966,10 @@ class OMRSoftware(QMainWindow):
 
     def run_recognition_all(self):
         if not self.pdf_document: 
-            QMessageBox.warning(self, "Warning", "No PDF loaded")
+            QMessageBox.warning(self, "Warning", tr("msg_no_pdf"))
             return
         if not self.view.option_marks and not self.view.text_marks:
-            QMessageBox.warning(self, "Warning", "No marks defined. Please mark regions first.")
+            QMessageBox.warning(self, "Warning", tr("msg_no_marks"))
             return
             
         self.results = {}
@@ -2486,8 +3107,8 @@ class OMRSoftware(QMainWindow):
         # Show summary
         total_pages = len(self.results)
         total_options = sum(len(r.get("options", {})) for r in self.results.values())
-        QMessageBox.information(self, "Recognition Complete", 
-            f"Processed {total_pages} pages.\nRecognized {total_options} option fields.")
+        QMessageBox.information(self, tr("msg_recognition_title"), 
+            tr("msg_recognition_complete", pages=total_pages, options=total_options))
         
         self.update_result_table()
 
@@ -2497,6 +3118,216 @@ class OMRSoftware(QMainWindow):
             # Refresh to show scores
             self.update_result_table()
 
+    def run_recognition_selected(self):
+        """Re-recognize specific pages (current, range, or all)."""
+        if not self.pdf_document:
+            QMessageBox.warning(self, "Warning", tr("msg_no_pdf"))
+            return
+        if not self.view.option_marks and not self.view.text_marks:
+            QMessageBox.warning(self, "Warning", tr("msg_no_marks"))
+            return
+
+        total_pages = len(self.pdf_document)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("dlg_recognize_title"))
+        dialog.resize(400, 200)
+        dlg_layout = QVBoxLayout(dialog)
+
+        dlg_layout.addWidget(QLabel(tr("dlg_recognize_prompt")))
+
+        from PyQt5.QtWidgets import QRadioButton, QLineEdit
+        rb_current = QRadioButton(tr("dlg_recognize_current") + f" ({self.current_page + 1})")
+        rb_current.setChecked(True)
+        rb_all = QRadioButton(tr("dlg_recognize_all_pages"))
+        rb_range = QRadioButton(tr("dlg_recognize_range"))
+        range_edit = QLineEdit()
+        range_edit.setPlaceholderText("e.g. 1-3, 5, 8")
+        range_edit.setEnabled(False)
+        rb_range.toggled.connect(range_edit.setEnabled)
+
+        dlg_layout.addWidget(rb_current)
+        dlg_layout.addWidget(rb_all)
+        dlg_layout.addWidget(rb_range)
+        dlg_layout.addWidget(range_edit)
+
+        btn_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        dlg_layout.addWidget(btn_box)
+        btn_box.accepted.connect(dialog.accept)
+        btn_box.rejected.connect(dialog.reject)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        # Parse selected pages
+        pages_to_process = []
+        if rb_current.isChecked():
+            pages_to_process = [self.current_page]
+        elif rb_all.isChecked():
+            pages_to_process = list(range(total_pages))
+        elif rb_range.isChecked():
+            range_text = range_edit.text().strip()
+            pages_to_process = self._parse_page_range(range_text, total_pages)
+            if not pages_to_process:
+                QMessageBox.warning(self, "Warning", "Invalid page range.")
+                return
+
+        if not pages_to_process:
+            return
+
+        # Ensure results dict exists
+        if not hasattr(self, 'results') or self.results is None:
+            self.results = {}
+
+        # Save current page's image offset
+        if self.current_pixmap_item:
+            self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
+
+        # For single page or partial re-recognition, we don't reset alignment template
+        # unless we're processing from page 0
+        if 0 in pages_to_process:
+            self.align_template = None
+            self.align_template_edges = None
+            self.align_template_clahe = None
+            self.align_template_pos = None
+            self.align_template_size = None
+            self.align_ref_full_gray = None
+            self.align_reference_gray = None
+            self.align_reference_bounds = None
+
+        progress = QtWidgets.QProgressDialog("Recognizing...", "Cancel", 0, len(pages_to_process), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        processed_count = 0
+        for idx, p_idx in enumerate(pages_to_process):
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                break
+            progress.setValue(idx)
+            progress.setLabelText(f"Re-recognizing page {p_idx + 1}...")
+
+            # Render page
+            page = self.pdf_document[p_idx]
+            mat = fitz.Matrix(2, 2)
+            pix = page.get_pixmap(matrix=mat)
+            img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+            if self.check_auto_deskew.isChecked():
+                img_np = np.array(img_pil)
+                img_corrected, skew_angle = deskew_image(img_np)
+                if skew_angle != 0.0:
+                    img_pil = Image.fromarray(img_corrected)
+
+            if self.check_auto_align.isChecked():
+                img_np = np.array(img_pil)
+                img_aligned, (dx, dy), response = self.align_image(img_np, p_idx)
+                if dx != 0.0 or dy != 0.0:
+                    img_pil = Image.fromarray(img_aligned)
+
+            off_x, off_y = self.page_offsets.get(p_idx, (0, 0))
+
+            page_res = {
+                "options": {},
+                "text": {},
+                "option_crops": {},
+                "text_crops": {}
+            }
+
+            # Preserve existing text data (student info) if not re-detected
+            if p_idx in self.results:
+                existing_texts = self.results[p_idx].get("text", {})
+            else:
+                existing_texts = {}
+
+            for mark in self.view.option_marks:
+                rect = mark.sceneBoundingRect()
+                img_x = rect.x() - off_x
+                img_y = rect.y() - off_y
+                left = max(0, int(img_x))
+                top = max(0, int(img_y))
+                right = min(img_pil.width, int(img_x + rect.width()))
+                bottom = min(img_pil.height, int(img_y + rect.height()))
+
+                if right > left and bottom > top:
+                    crop = img_pil.crop((left, top, right, bottom))
+                    crop_path = self._save_crop_image(crop, p_idx, f"Q{mark.question_num}", "option")
+                    text = self.detect_filled_option(crop, mark.options_count, save_debug=True,
+                        context={"page": p_idx + 1, "question": mark.question_num, "label": f"Q{mark.question_num}"})
+                else:
+                    text = "[Out of bounds]"
+                    crop_path = ""
+                page_res["options"][mark.question_num] = text
+                page_res["option_crops"][mark.question_num] = crop_path
+
+            for mark in self.view.text_marks:
+                rect = mark.sceneBoundingRect()
+                img_x = rect.x() - off_x
+                img_y = rect.y() - off_y
+                left = max(0, int(img_x))
+                top = max(0, int(img_y))
+                right = min(img_pil.width, int(img_x + rect.width()))
+                bottom = min(img_pil.height, int(img_y + rect.height()))
+                key = mark.label if mark.label else f"Field {mark.question_num}"
+
+                if right > left and bottom > top:
+                    crop = img_pil.crop((left, top, right, bottom))
+                    crop_path = self._save_crop_image(crop, p_idx, key, "text")
+                    text = self.get_ocr_result(crop, save_debug=True)
+                else:
+                    text = "[Out of bounds]"
+                    crop_path = ""
+                page_res["text"][key] = text
+                page_res["text_crops"][key] = crop_path
+
+            # Merge preserved student info for fields not covered by marks
+            for k, v in existing_texts.items():
+                if k not in page_res["text"]:
+                    page_res["text"][k] = v
+
+            self.results[p_idx] = page_res
+            processed_count += 1
+
+        progress.setValue(len(pages_to_process))
+        progress.close()
+
+        total_options = sum(len(self.results.get(p, {}).get("options", {})) for p in pages_to_process if p in self.results)
+        QMessageBox.information(self, tr("msg_recognition_title"),
+            tr("msg_recognition_complete", pages=processed_count, options=total_options))
+
+        self.update_result_table()
+
+        if self.first_page_key and 0 in self.results:
+            self.answer_key = self.results[0]["options"]
+            self.update_result_table()
+
+    def _parse_page_range(self, text, total_pages):
+        """Parse page range string like '1-3, 5, 8' into list of 0-based page indices."""
+        pages = set()
+        parts = text.split(",")
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                try:
+                    start, end = part.split("-", 1)
+                    start = int(start.strip())
+                    end = int(end.strip())
+                    for p in range(start, end + 1):
+                        if 1 <= p <= total_pages:
+                            pages.add(p - 1)
+                except ValueError:
+                    continue
+            else:
+                try:
+                    p = int(part)
+                    if 1 <= p <= total_pages:
+                        pages.add(p - 1)
+                except ValueError:
+                    continue
+        return sorted(pages)
 
     def update_result_table(self):
         # Display results for CURRENT page
@@ -2508,32 +3339,13 @@ class OMRSoftware(QMainWindow):
         # structure: {"options": {1: "A", ...}, "text": {"Name": "John", ...}}
         
         opts = page_res.get("options", {})
-        texts = page_res.get("text", {})
         option_crops = page_res.get("option_crops", {})
-        text_crops = page_res.get("text_crops", {})
-        
-        self.table.setRowCount(len(texts) + len(opts))
+
+        self.table.setRowCount(len(opts))
         
         current_row = 0
-        
-        # 1. Text Fields
-        for key, val in texts.items():
-            self.table.setItem(current_row, 0, QTableWidgetItem(str(key)))
-            self.table.setItem(current_row, 1, QTableWidgetItem(str(val)))
-            self.table.setItem(current_row, 2, QTableWidgetItem("-")) # No correct answer for info
-            self.table.setItem(current_row, 3, QTableWidgetItem("-")) # No points
-            crop_item = QTableWidgetItem("Open") if text_crops.get(key) else QTableWidgetItem("-")
-            crop_item.setFlags(Qt.ItemIsEnabled)
-            crop_item.setForeground(QColor("#007bff"))
-            crop_item.setData(Qt.UserRole, text_crops.get(key, ""))
-            self.table.setItem(current_row, 4, crop_item)
             
-            # Grey out key/points
-            self.table.item(current_row, 2).setFlags(Qt.ItemIsEnabled)
-            self.table.item(current_row, 3).setFlags(Qt.ItemIsEnabled)
-            current_row += 1
-            
-        # 2. Options
+        # Options only (text/student fields are managed via the Student Info dialog)
         sorted_qs = sorted(opts.keys())
         total_score = 0
         
@@ -2574,39 +3386,37 @@ class OMRSoftware(QMainWindow):
             
             current_row += 1
         
-        self.lbl_score.setText(f"Page Score: {total_score}")
+        self.lbl_score.setText(tr("lbl_score", score=total_score))
         self.table.blockSignals(False)
 
     def on_table_edit(self, row, col):
         if col == 1:
-            item_header = self.table.item(row, 0).text()
+            item_header = self.table.item(row, 0)
+            if not item_header:
+                return
+            header_text = item_header.text()
             new_val = self.table.item(row, 1).text()
-            if item_header.startswith("Q"):
+            if header_text.startswith("Q"):
                 try:
-                    q_txt = item_header.replace("Q", "")
-                    q_num = int(q_txt)
+                    q_num = int(header_text.replace("Q", ""))
                     if self.current_page in self.results:
                         self.results[self.current_page]["options"][q_num] = new_val
                 except:
                     pass
-            else:
-                if self.current_page in self.results:
-                    self.results[self.current_page]["text"][item_header] = new_val
             self.update_result_table()
         elif col == 2: # Correct Answer column
-            item_header = self.table.item(row, 0).text()
-            if item_header.startswith("Q"):
+            item_header = self.table.item(row, 0)
+            if not item_header:
+                return
+            header_text = item_header.text()
+            if header_text.startswith("Q"):
                 try:
-                    q_txt = item_header.replace("Q", "")
-                    q_num = int(q_txt)
+                    q_num = int(header_text.replace("Q", ""))
                     new_ans = self.table.item(row, 2).text()
                     self.answer_key[q_num] = new_ans
                     self.update_result_table()
                 except:
                     pass
-            else:
-                # Text field, reset if user tries to edit key
-                self.table.item(row, 2).setText("-")
 
     def open_crop_from_table(self, row, col):
         if col != 4:
@@ -2648,280 +3458,66 @@ class OMRSoftware(QMainWindow):
         menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     def export_excel(self):
-        if not hasattr(self, 'results'): return
+        """Export Excel to a user-chosen file."""
+        if not hasattr(self, 'results'):
+            return
         prefix = self._get_pdf_prefix()
         timestamp = self._get_timestamp()
         default_name = f"{prefix}_{timestamp}.xlsx"
         fname, _ = QFileDialog.getSaveFileName(self, "Export Excel", default_name, "Excel (*.xlsx)")
-        if not fname: return
-
-        include_summary = self.check_include_summary.isChecked() if hasattr(self, "check_include_summary") else True
-        include_topics = self.check_include_topics.isChecked() if hasattr(self, "check_include_topics") else True
-
-        # Ensure filename includes prefix and timestamp
-        base_dir = os.path.dirname(fname)
-        fname = os.path.join(base_dir, default_name)
-        
-        # Import styling for highlighting empty cells
-        from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-        from openpyxl.utils import get_column_letter
-        
-        # Define styles
-        yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")  # Yellow for empty answers
-        orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")  # Orange for multiple selections
-        green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Light green for stats header
-        header_font = Font(bold=True)
-        center_align = Alignment(horizontal='center')
-        thin_border = Border(
-            left=Side(style='thin'),
-            right=Side(style='thin'),
-            top=Side(style='thin'),
-            bottom=Side(style='thin')
-        )
-        
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "OMR Results"
-        
-        # Gather all headers
-        all_qs = set()
-        all_texts = set()
-        
-        for p_res in self.results.values():
-            all_qs.update(p_res.get("options", {}).keys())
-            all_texts.update(p_res.get("text", {}).keys())
-            
-        sorted_qs = sorted(list(all_qs))
-        sorted_texts = sorted(list(all_texts))
-        
-        # Calculate column positions
-        # Column A = Page, then text fields, then questions, then Score
-        text_start_col = 2  # B
-        q_start_col = text_start_col + len(sorted_texts)  # After text fields
-        score_col = q_start_col + len(sorted_qs)  # After questions
-        
-        # Headers: Page, [Text Fields], [Questions], Total Score
-        headers = ["Page"] + sorted_texts + [f"Q{q}" for q in sorted_qs] + ["Score"]
-        ws.append(headers)
-        
-        # Key Row (row 2)
-        key_row = ["Key"] + [""] * len(sorted_texts)
-        for q in sorted_qs: key_row.append(self.answer_key.get(q, ""))
-        key_row.append("")  # No score for key row
-        ws.append(key_row)
-        
-        # Data rows start from row 3
-        data_row_num = 3
-        first_data_row = 3
-        empty_cells = []  # Track cells with empty answers for highlighting
-        multiple_cells = []  # Track cells with multiple selections for highlighting
-        page_scores = []
-        page_totals = []
-        page_blank_counts = []
-        page_multi_counts = []
-        
-        for p_idx, res in self.results.items():
-            if self.first_page_key and p_idx == 0: continue
-            
-            row = [p_idx + 1]
-            
-            # Text Fields
-            texts = res.get("text", {})
-            for t_key in sorted_texts:
-                row.append(texts.get(t_key, ""))
-                
-            # Questions - track empty answers and multiple selections
-            opts = res.get("options", {})
-            page_blank = 0
-            page_multi = 0
-            page_score = 0
-            page_total = 0
-            for q_idx, q in enumerate(sorted_qs):
-                val = opts.get(q, "")
-                row.append(val)
-                col_letter = get_column_letter(q_start_col + q_idx)
-                # Track empty answers for highlighting
-                if val == "" or val is None:
-                    empty_cells.append(f"{col_letter}{data_row_num}")
-                    page_blank += 1
-                # Track multiple selections (e.g., "AB", "BC") for highlighting
-                elif len(str(val)) > 1:
-                    multiple_cells.append(f"{col_letter}{data_row_num}")
-                    page_multi += 1
-                correct_val = self.answer_key.get(q, "")
-                if correct_val != "":
-                    page_total += 1
-                    if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
-                        page_score += 1
-            
-            # Score formula using SUMPRODUCT to compare each answer with key row
-            # Formula: =SUMPRODUCT((C3:Z3=C$2:Z$2)*1) where C:Z are question columns
-            if sorted_qs:
-                first_q_col = get_column_letter(q_start_col)
-                last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
-                score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
-                row.append(score_formula)
-            else:
-                row.append(0)
-            
-            ws.append(row)
-            page_scores.append(page_score)
-            page_totals.append(page_total)
-            page_blank_counts.append(page_blank)
-            page_multi_counts.append(page_multi)
-            data_row_num += 1
-        
-        last_data_row = data_row_num - 1
-        
-        # Apply yellow highlighting to empty answer cells
-        for cell_ref in empty_cells:
-            ws[cell_ref].fill = yellow_fill
-        
-        # Apply orange highlighting to multiple selection cells
-        for cell_ref in multiple_cells:
-            ws[cell_ref].fill = orange_fill
-        
-        # Add Statistics Row - Percentage correct per question
-        if sorted_qs and last_data_row >= first_data_row:
-            stats_row_num = data_row_num + 1  # Skip one row
-            
-            # Stats header row
-            ws.cell(row=stats_row_num, column=1, value="% Correct").fill = green_fill
-            ws.cell(row=stats_row_num, column=1).font = header_font
-            
-            # Add percentage formula for each question
-            # Formula: =COUNTIF(col_range, key_cell) / COUNT of non-empty cells * 100
-            for q_idx, q in enumerate(sorted_qs):
-                col_num = q_start_col + q_idx
-                col_letter = get_column_letter(col_num)
-                
-                # Calculate % correct: count matches with key / total responses
-                # =COUNTIF(C3:C10, C2) / COUNTA(C3:C10) * 100
-                # COUNTA counts non-empty cells
-                data_range = f"{col_letter}{first_data_row}:{col_letter}{last_data_row}"
-                key_cell = f"{col_letter}$2"
-                
-                percent_formula = f'=IF(COUNTA({data_range})>0, COUNTIF({data_range},{key_cell})/COUNTA({data_range})*100, 0)'
-                
-                cell = ws.cell(row=stats_row_num, column=col_num, value=percent_formula)
-                cell.fill = green_fill
-                cell.alignment = center_align
-                cell.number_format = '0.0"%"'
-            
-            # Average % correct in Score column
-            if sorted_qs:
-                first_q_col = get_column_letter(q_start_col)
-                last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
-                avg_formula = f'=AVERAGE({first_q_col}{stats_row_num}:{last_q_col}{stats_row_num})'
-                cell = ws.cell(row=stats_row_num, column=score_col, value=avg_formula)
-                cell.fill = green_fill
-                cell.alignment = center_align
-                cell.number_format = '0.0"%"'
-        
-        # Style header row
-        for col in range(1, len(headers) + 1):
-            ws.cell(row=1, column=col).font = header_font
-            ws.cell(row=1, column=col).alignment = center_align
-
-        # Summary analysis sheet
-        if include_summary:
-            summary = wb.create_sheet("Summary")
-            summary.append(["Metric", "Value"])
-            summary.cell(row=1, column=1).font = header_font
-            summary.cell(row=1, column=2).font = header_font
-
-            total_pages = len(page_scores)
-            total_questions = max(page_totals) if page_totals else 0
-            avg_score = statistics.mean(page_scores) if page_scores else 0
-            median_score = statistics.median(page_scores) if page_scores else 0
-            max_score = max(page_scores) if page_scores else 0
-            min_score = min(page_scores) if page_scores else 0
-            stdev_score = statistics.pstdev(page_scores) if len(page_scores) > 1 else 0
-            avg_blank = statistics.mean(page_blank_counts) if page_blank_counts else 0
-            avg_multi = statistics.mean(page_multi_counts) if page_multi_counts else 0
-
-            summary.append(["Total Pages", total_pages])
-            summary.append(["Total Questions", total_questions])
-            summary.append(["Average Score", avg_score])
-            summary.append(["Median Score", median_score])
-            summary.append(["Max Score", max_score])
-            summary.append(["Min Score", min_score])
-            summary.append(["Score Std Dev", stdev_score])
-            summary.append(["Avg Blank Answers", avg_blank])
-            summary.append(["Avg Multiple Answers", avg_multi])
-
-        # Topics sheet (user-editable)
-        if include_topics:
-            topics_sheet = wb.create_sheet("Topics")
-            topics_sheet.append(["Question", "Topic"])
-            topics_sheet.cell(row=1, column=1).font = header_font
-            topics_sheet.cell(row=1, column=2).font = header_font
-            for q in sorted_qs:
-                topics_sheet.append([f"Q{q}", self.topic_map.get(q, "")])
-
-            # Topic analysis sheet based on current topic map
-            topic_groups = {}
-            for q in sorted_qs:
-                topic = self.topic_map.get(q, "").strip() or "Unassigned"
-                topic_groups.setdefault(topic, []).append(q)
-
-            analysis = wb.create_sheet("Topic Analysis")
-            analysis.append(["Topic", "Questions", "Avg Score", "Avg %"])
-            for col in range(1, 5):
-                analysis.cell(row=1, column=col).font = header_font
-
-            pages_count = len(page_scores)
-            for topic, qs in topic_groups.items():
-                total_items = max(1, len(qs) * max(1, pages_count))
-                correct_count = 0
-                for p_idx, res in self.results.items():
-                    if self.first_page_key and p_idx == 0:
-                        continue
-                    opts = res.get("options", {})
-                    for q in qs:
-                        correct_val = self.answer_key.get(q, "")
-                        if correct_val == "":
-                            continue
-                        val = opts.get(q, "")
-                        if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
-                            correct_count += 1
-                avg_score_topic = correct_count / max(1, pages_count)
-                avg_pct = correct_count / total_items * 100
-                analysis.append([topic, ", ".join([f"Q{q}" for q in qs]), avg_score_topic, avg_pct])
-            
-        wb.save(fname)
-        
-        empty_count = len(empty_cells)
-        multiple_count = len(multiple_cells)
-        msg = "Export complete! Score is calculated by formula.\n"
-        if empty_count > 0:
-            msg += f"\n⚠️ {empty_count} empty answers highlighted in yellow."
-        if multiple_count > 0:
-            msg += f"\n🔶 {multiple_count} multiple selections highlighted in orange."
-        msg += "\n\n📊 Per-question % correct statistics added at bottom."
-        QMessageBox.information(self, "Done", msg)
+        if not fname:
+            return
+        self._export_excel_internal(fname)
+        QMessageBox.information(self, "Done", tr("msg_export_done", folder=os.path.dirname(fname)))
 
     def export_results_bundle(self):
-        """Export Excel (and optionally images) to the same folder as the PDF."""
+        """Export Excel (and optionally images) to a user-chosen folder."""
         if not hasattr(self, 'results'):
-            QMessageBox.warning(self, "Error", "No results to export")
+            QMessageBox.warning(self, "Error", tr("msg_no_results"))
             return
         if not hasattr(self, 'pdf_path') or not self.pdf_path:
-            QMessageBox.warning(self, "Error", "No PDF loaded")
+            QMessageBox.warning(self, "Error", tr("msg_no_pdf"))
+            return
+
+        # Let user choose the parent location
+        default_dir = os.path.dirname(self.pdf_path)
+        parent_folder = QFileDialog.getExistingDirectory(
+            self, tr("dlg_select_export_folder"), default_dir)
+        if not parent_folder:
             return
 
         prefix = self._get_pdf_prefix()
         timestamp = self._get_timestamp()
-        parent_folder = os.path.dirname(self.pdf_path)
+        export_folder = os.path.join(parent_folder, f"{prefix}_{timestamp}")
+        os.makedirs(export_folder, exist_ok=True)
 
-        excel_path = os.path.join(parent_folder, f"{prefix}_{timestamp}.xlsx")
+        include_images = self.check_export_images.isChecked()
+        total_steps = 1 + (len(self.pdf_document) if include_images else 0)
+
+        from PyQt5.QtWidgets import QProgressDialog
+        progress = QProgressDialog(tr("progress_exporting"), "Cancel", 0, total_steps, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+        QtWidgets.QApplication.processEvents()
+
+        # Step 1: Export Excel
+        progress.setLabelText(tr("progress_exporting_excel"))
+        QtWidgets.QApplication.processEvents()
+        excel_path = os.path.join(export_folder, f"{prefix}_{timestamp}.xlsx")
         self._export_excel_internal(excel_path)
+        progress.setValue(1)
+        if progress.wasCanceled():
+            return
 
-        if self.check_export_images.isChecked():
-            img_folder = os.path.join(parent_folder, f"{prefix}_{timestamp}")
-            self._export_images_internal(img_folder)
+        # Step 2: Export images (if enabled)
+        if include_images:
+            img_folder = os.path.join(export_folder, "images")
+            self._export_images_internal(img_folder, progress=progress, progress_offset=1)
 
-        QMessageBox.information(self, "Done", f"Exported results to:\n{parent_folder}")
+        progress.setValue(total_steps)
+        progress.close()
+        QMessageBox.information(self, "Done", tr("msg_export_done", folder=export_folder))
     
     def export_images(self):
         """Export scanned pages as images with answer overlay (red dots for correct answers)"""
@@ -2964,6 +3560,11 @@ class OMRSoftware(QMainWindow):
             if progress.wasCanceled(): break
             progress.setValue(page_idx)
             QtWidgets.QApplication.processEvents()
+
+            # Skip absent pages
+            is_absent = self.student_absence.get(page_idx, False) if hasattr(self, 'student_absence') else False
+            if is_absent:
+                continue
             
             # Render page at 2x scale
             page = self.pdf_document[page_idx]
@@ -3565,18 +4166,25 @@ class OMRSoftware(QMainWindow):
         for p_res in self.results.values():
             all_qs.update(p_res.get("options", {}).keys())
             all_texts.update(p_res.get("text", {}).keys())
+
+        # Also collect text keys from extra students (absent students without PDF pages)
+        extra_students = getattr(self, 'extra_students', [])
+        for extra in extra_students:
+            all_texts.update(extra.get("text", {}).keys())
             
         sorted_qs = sorted(list(all_qs))
         sorted_texts = sorted(list(all_texts))
         
         text_start_col = 2
-        q_start_col = text_start_col + len(sorted_texts)
+        absent_col_num = text_start_col + len(sorted_texts)
+        q_start_col = absent_col_num + 1
         score_col = q_start_col + len(sorted_qs)
         
-        headers = ["Page"] + sorted_texts + [f"Q{q}" for q in sorted_qs] + ["Score"]
+        absent_label = tr("dlg_student_absent")
+        headers = ["Page"] + sorted_texts + [absent_label] + [f"Q{q}" for q in sorted_qs] + ["Score"]
         ws.append(headers)
         
-        key_row = ["Key"] + [""] * len(sorted_texts)
+        key_row = ["Key"] + [""] * len(sorted_texts) + [""]
         for q in sorted_qs:
             key_row.append(self.answer_key.get(q, ""))
         key_row.append("")
@@ -3599,6 +4207,9 @@ class OMRSoftware(QMainWindow):
             texts = res.get("text", {})
             for t_key in sorted_texts:
                 row.append(texts.get(t_key, ""))
+
+            is_absent = self.student_absence.get(p_idx, False) if hasattr(self, 'student_absence') else False
+            row.append("✓" if is_absent else "")
                 
             opts = res.get("options", {})
             page_blank = 0
@@ -3606,34 +4217,50 @@ class OMRSoftware(QMainWindow):
             page_score = 0
             page_total = 0
             for q_idx, q in enumerate(sorted_qs):
-                val = opts.get(q, "")
+                val = opts.get(q, "") if not is_absent else ""
                 row.append(val)
-                col_letter = get_column_letter(q_start_col + q_idx)
-                if val == "" or val is None:
-                    empty_cells.append(f"{col_letter}{data_row_num}")
-                    page_blank += 1
-                elif len(str(val)) > 1:
-                    multiple_cells.append(f"{col_letter}{data_row_num}")
-                    page_multi += 1
-                correct_val = self.answer_key.get(q, "")
-                if correct_val != "":
-                    page_total += 1
-                    if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
-                        page_score += 1
+                if not is_absent:
+                    col_letter = get_column_letter(q_start_col + q_idx)
+                    if val == "" or val is None:
+                        empty_cells.append(f"{col_letter}{data_row_num}")
+                        page_blank += 1
+                    elif len(str(val)) > 1:
+                        multiple_cells.append(f"{col_letter}{data_row_num}")
+                        page_multi += 1
+                    correct_val = self.answer_key.get(q, "")
+                    if correct_val != "":
+                        page_total += 1
+                        if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
+                            page_score += 1
             
-            if sorted_qs:
+            if sorted_qs and not is_absent:
                 first_q_col = get_column_letter(q_start_col)
                 last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
                 score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
                 row.append(score_formula)
             else:
-                row.append(0)
+                row.append("")
             
             ws.append(row)
-            page_scores.append(page_score)
-            page_totals.append(page_total)
-            page_blank_counts.append(page_blank)
-            page_multi_counts.append(page_multi)
+            # Only include non-absent students in statistics
+            if not is_absent:
+                page_scores.append(page_score)
+                page_totals.append(page_total)
+                page_blank_counts.append(page_blank)
+                page_multi_counts.append(page_multi)
+            data_row_num += 1
+
+        # Append extra students (absent students added beyond PDF pages)
+        for extra in extra_students:
+            row = ["-"]
+            extra_texts = extra.get("text", {})
+            for t_key in sorted_texts:
+                row.append(extra_texts.get(t_key, ""))
+            row.append("✓" if extra.get("absent", True) else "")
+            for q in sorted_qs:
+                row.append("")
+            row.append("")
+            ws.append(row)
             data_row_num += 1
         
         last_data_row = data_row_num - 1
@@ -3738,8 +4365,14 @@ class OMRSoftware(QMainWindow):
         wb.save(output_path)
         print(f"  Excel saved: {output_path}")
     
-    def _export_images_internal(self, output_folder):
-        """Internal method to export images without file dialog."""
+    def _export_images_internal(self, output_folder, progress=None, progress_offset=0):
+        """Internal method to export images without file dialog.
+        
+        Args:
+            output_folder: Path to save images.
+            progress: Optional QProgressDialog to update.
+            progress_offset: Value offset for progress updates (when sharing a progress bar).
+        """
         if not hasattr(self, 'pdf_document') or self.pdf_document is None:
             return
         if not hasattr(self, 'view') or not self.view.option_marks:
@@ -3757,8 +4390,19 @@ class OMRSoftware(QMainWindow):
         self.align_reference_gray = None
         self.align_reference_bounds = None
         
-        for page_idx in range(len(self.pdf_document)):
+        total_pages = len(self.pdf_document)
+        for page_idx in range(total_pages):
+            if progress is not None:
+                if progress.wasCanceled():
+                    return
+                progress.setLabelText(tr("progress_exporting_images", current=page_idx + 1, total=total_pages))
+                progress.setValue(progress_offset + page_idx)
             QtWidgets.QApplication.processEvents()
+
+            # Skip absent pages
+            is_absent = self.student_absence.get(page_idx, False) if hasattr(self, 'student_absence') else False
+            if is_absent:
+                continue
             
             page = self.pdf_document[page_idx]
             mat = fitz.Matrix(2, 2)
@@ -3877,8 +4521,14 @@ class OMRSoftware(QMainWindow):
             painter.restore()
             painter.end()
             
-            output_path = os.path.join(output_folder, f"page_{page_idx + 1:03d}.png")
-            qimg.save(output_path)
+            filename = self._get_page_filename(page_idx)
+            # Avoid overwriting if two pages produce the same stem
+            candidate = os.path.join(output_folder, f"{filename}.png")
+            suffix = 1
+            while os.path.exists(candidate):
+                candidate = os.path.join(output_folder, f"{filename}_{suffix}.png")
+                suffix += 1
+            qimg.save(candidate)
         
         print(f"  Images saved: {output_folder}")
 
