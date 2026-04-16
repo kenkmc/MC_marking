@@ -55,7 +55,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -105,8 +105,8 @@ _TRANSLATIONS = {
         "group_marking": "2. Marking Tools",
         "btn_mark_text": "Mark Text Field",
         "btn_mark_option": "Mark Options",
-        "btn_mark_align": "📍 Mark Alignment Region",
-        "tip_mark_align": "Mark a reference region (e.g., a table corner) for aligning scanned pages",
+        "btn_mark_align": "📍 Mark Alignment Regions",
+        "tip_mark_align": "Mark reference regions (e.g., table corners) for aligning scanned pages. Multiple marks improve accuracy.",
         "lbl_mark_hint1": "Right-click marks to Rename/Delete/Config",
         "lbl_mark_hint2": "Click mark to select, then drag corners to resize",
         "btn_undo": "↩ Undo",
@@ -189,7 +189,7 @@ _TRANSLATIONS = {
         "lang_en": "English",
         "lang_zh": "繁體中文",
         # Alignment mark overlay
-        "align_overlay": "📍 Alignment Reference",
+        "align_overlay": "Align",
         # Student info defaults
         "field_class": "Class",
         "field_student_no": "Student No.",
@@ -218,7 +218,7 @@ _TRANSLATIONS = {
         "btn_mark_text": "標記文字欄",
         "btn_mark_option": "標記選項",
         "btn_mark_align": "📍 標記對齊區域",
-        "tip_mark_align": "標記參考區域（例如表格角落）以對齊掃描頁面",
+        "tip_mark_align": "標記參考區域（例如表格角落）以對齊掃描頁面。多個標記可提高準確度。",
         "lbl_mark_hint1": "右鍵點擊標記可重新命名/刪除/設定",
         "lbl_mark_hint2": "點選標記後拖曳角落可調整大小",
         "btn_undo": "↩ 復原",
@@ -301,7 +301,7 @@ _TRANSLATIONS = {
         "lang_en": "English",
         "lang_zh": "繁體中文",
         # Alignment mark overlay
-        "align_overlay": "📍 對齊參考區域",
+        "align_overlay": "對齊",
         # Student info defaults
         "field_class": "班別",
         "field_student_no": "學號",
@@ -680,10 +680,10 @@ class MarkItem(QGraphicsRectItem):
                 display_text += f" ({self.label})"
             painter.drawText(int(rect.x()), int(rect.y()) - 3, display_text)
         elif self.mark_type == MARK_TYPE_ALIGN:
-            # Alignment reference - show label
+            # Alignment reference - show label with number
             painter.setPen(QPen(QColor(0, 150, 0)))
             painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
-            display_text = tr("align_overlay")
+            display_text = f"📍 {tr('align_overlay')} {self.question_num}"
             if self.label:
                 display_text = f"📍 {self.label}"
             painter.drawText(rect, Qt.AlignCenter, display_text)
@@ -780,13 +780,14 @@ class MarkingView(QGraphicsView):
         # Marks storage
         self.text_marks = []
         self.option_marks = []
-        self.align_mark = None  # Only one alignment mark allowed
+        self.align_marks = []  # Multiple alignment marks allowed
         self.mark_history = []  # Track order of marks for undo
         
         # Memory for size - reasonable defaults for typical answer sheets
         self.last_option_size = (200, 35) # Default size for option boxes
         self.last_text_size = (150, 30)   # Default size for text fields
         self.last_align_size = (200, 80)  # Default alignment region size
+        self.align_counter = 1  # Counter for alignment marks
         
         # Zoom
         self.zoom_factor = 1.0
@@ -813,8 +814,8 @@ class MarkingView(QGraphicsView):
             # Restore counter if this was the last item with that number
             if not any(m.question_num >= item.question_num for m in self.option_marks):
                 self.option_counter = item.question_num
-        if item == self.align_mark:
-            self.align_mark = None
+        if item in self.align_marks:
+            self.align_marks.remove(item)
         # Remove from history if present
         if item in self.mark_history:
             self.mark_history.remove(item)
@@ -857,6 +858,8 @@ class MarkingView(QGraphicsView):
             
             if self.current_mark_type == MARK_TYPE_TEXT:
                 counter = self.text_counter
+            elif self.current_mark_type == MARK_TYPE_ALIGN:
+                counter = self.align_counter
             else:
                 counter = self.option_counter
             
@@ -932,13 +935,10 @@ class MarkingView(QGraphicsView):
                     self.text_counter += 1
                 elif self.current_mark_type == MARK_TYPE_ALIGN:
                     self.last_align_size = (actual_width, actual_height)
-                    # Only one alignment mark allowed - remove old one
-                    if self.align_mark is not None:
-                        self.scene().removeItem(self.align_mark)
-                        if self.align_mark in self.mark_history:
-                            self.mark_history.remove(self.align_mark)
-                    self.align_mark = self.current_rect
+                    # Multiple alignment marks allowed
+                    self.align_marks.append(self.current_rect)
                     self.mark_history.append(self.current_rect)  # Track for undo
+                    self.align_counter += 1
                 else:
                     self.last_option_size = (actual_width, actual_height)
                     self.option_marks.append(self.current_rect)
@@ -958,7 +958,7 @@ class MarkingView(QGraphicsView):
         marks_data = {
             "text_marks": [],
             "option_marks": [],
-            "align_mark": None
+            "align_marks": []
         }
         for mark in self.text_marks:
             try: marks_data["text_marks"].append(mark.get_data())
@@ -966,9 +966,9 @@ class MarkingView(QGraphicsView):
         for mark in self.option_marks:
             try: marks_data["option_marks"].append(mark.get_data())
             except: continue
-        if self.align_mark:
-            try: marks_data["align_mark"] = self.align_mark.get_data()
-            except: pass
+        for mark in self.align_marks:
+            try: marks_data["align_marks"].append(mark.get_data())
+            except: continue
         return marks_data
         
     def load_marks_from_data(self, data):
@@ -1065,8 +1065,8 @@ class OMRSoftware(QMainWindow):
 
         h, w = img_np.shape[:2]
         
-        # Check if user defined an alignment region
-        if hasattr(self, 'view') and self.view.align_mark is not None:
+        # Check if user defined alignment region(s)
+        if hasattr(self, 'view') and len(self.view.align_marks) > 0:
             return self._align_using_template(img_np, page_idx)
         
         # Fall back to automatic table boundary detection
@@ -1124,6 +1124,7 @@ class OMRSoftware(QMainWindow):
     def _align_using_template(self, img_np, page_idx):
         """
         Align image using enhanced multi-strategy template matching.
+        Supports multiple alignment marks for more robust alignment.
         
         Improvements over basic template matching:
         1. Edge-based matching: Uses Canny edges instead of raw grayscale,
@@ -1136,74 +1137,95 @@ class OMRSoftware(QMainWindow):
            OpenCV matching algorithms to reject false positives.
         5. Larger adaptive search margin: Adjusts based on image size.
         6. Enhanced sub-pixel refinement with 2D quadratic fitting.
+        7. Multiple alignment marks: Uses weighted average of shifts from
+           all alignment regions for better accuracy.
         """
         h, w = img_np.shape[:2]
         
-        # First page: extract and store the template
-        if not hasattr(self, 'align_template') or self.align_template is None:
+        # First page: extract and store templates from all alignment marks
+        if not hasattr(self, 'align_templates') or not self.align_templates:
             return self._align_init_template(img_np, page_idx)
         
-        # Subsequent pages: find template and calculate correction
+        # Subsequent pages: find templates and calculate correction
         return self._align_match_page(img_np, page_idx)
     
+    def _reset_align_templates(self):
+        """Reset all alignment template data. Call before each new recognition run."""
+        self.align_templates = []
+        self.align_ref_full_gray = None
+        self.align_reference_gray = None
+        self.align_reference_bounds = None
+
     def _align_init_template(self, img_np, page_idx):
-        """Extract and store alignment templates from the first (reference) page."""
+        """Extract and store alignment templates from the first (reference) page.
+        Supports multiple alignment marks for more robust alignment."""
         h, w = img_np.shape[:2]
-        align_mark = self.view.align_mark
-        rect = align_mark.sceneBoundingRect()
-        off_x, off_y = self.page_offsets.get(0, (0, 0))
-        
-        ref_x = int(rect.x() - off_x)
-        ref_y = int(rect.y() - off_y)
-        ref_w = int(rect.width())
-        ref_h = int(rect.height())
-        
-        ref_x = max(0, ref_x)
-        ref_y = max(0, ref_y)
-        
-        print(f"  Template align: Creating reference from region=({ref_x},{ref_y}) size=({ref_w}x{ref_h})")
         
         if len(img_np.shape) == 3:
             gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
         else:
             gray = img_np.copy()
         
-        end_x = min(ref_x + ref_w, gray.shape[1])
-        end_y = min(ref_y + ref_h, gray.shape[0])
+        self.align_templates = []
         
-        if end_x <= ref_x or end_y <= ref_y:
-            print("  Template align: Invalid template region")
+        for mark_idx, align_mark in enumerate(self.view.align_marks):
+            rect = align_mark.sceneBoundingRect()
+            off_x, off_y = self.page_offsets.get(0, (0, 0))
+            
+            ref_x = int(rect.x() - off_x)
+            ref_y = int(rect.y() - off_y)
+            ref_w = int(rect.width())
+            ref_h = int(rect.height())
+            
+            ref_x = max(0, ref_x)
+            ref_y = max(0, ref_y)
+            
+            print(f"  Template align: Creating reference #{mark_idx+1} from region=({ref_x},{ref_y}) size=({ref_w}x{ref_h})")
+            
+            end_x = min(ref_x + ref_w, gray.shape[1])
+            end_y = min(ref_y + ref_h, gray.shape[0])
+            
+            if end_x <= ref_x or end_y <= ref_y:
+                print(f"  Template align: Invalid template region #{mark_idx+1}, skipping")
+                continue
+            
+            # Store grayscale template
+            template_gray = gray[ref_y:end_y, ref_x:end_x].copy()
+            
+            # Store edge-enhanced template (primary matching target)
+            template_edges = cv2.Canny(template_gray, 50, 150)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            template_edges = cv2.dilate(template_edges, kernel, iterations=1)
+            
+            # Store CLAHE-enhanced template for secondary verification
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            template_clahe = clahe.apply(template_gray)
+            
+            self.align_templates.append({
+                'gray': template_gray,
+                'edges': template_edges,
+                'clahe': template_clahe,
+                'pos': (ref_x, ref_y),
+                'size': (end_x - ref_x, end_y - ref_y),
+            })
+            
+            print(f"  Template align: Reference #{mark_idx+1} extracted at ({ref_x},{ref_y}), size={template_gray.shape}")
+            print(f"  Template align: Edge density #{mark_idx+1}: {np.count_nonzero(template_edges)}/{template_edges.size} pixels")
+        
+        if not self.align_templates:
+            print("  Template align: No valid alignment regions found")
             return img_np, (0.0, 0.0), 0.0
-        
-        # Store grayscale template
-        template_gray = gray[ref_y:end_y, ref_x:end_x].copy()
-        
-        # Store edge-enhanced template (primary matching target)
-        # Edge detection makes matching robust to brightness/contrast variations
-        template_edges = cv2.Canny(template_gray, 50, 150)
-        # Dilate edges slightly for better matching tolerance
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        template_edges = cv2.dilate(template_edges, kernel, iterations=1)
-        
-        # Store CLAHE-enhanced template for secondary verification
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        template_clahe = clahe.apply(template_gray)
-        
-        self.align_template = template_gray
-        self.align_template_edges = template_edges
-        self.align_template_clahe = template_clahe
-        self.align_template_pos = (ref_x, ref_y)
-        self.align_template_size = (end_x - ref_x, end_y - ref_y)
         
         # Store full-page reference gray for rotation detection
         self.align_ref_full_gray = gray.copy()
         
-        print(f"  Template align: Reference template extracted at ({ref_x},{ref_y}), size={template_gray.shape}")
-        print(f"  Template align: Edge template density: {np.count_nonzero(template_edges)}/{template_edges.size} pixels")
+        print(f"  Template align: {len(self.align_templates)} reference template(s) initialized")
         return img_np, (0.0, 0.0), 1.0
     
     def _align_match_page(self, img_np, page_idx):
-        """Match current page against reference template using multi-strategy approach."""
+        """Match current page against all reference templates using multi-strategy approach.
+        When multiple alignment marks are present, each template is matched independently
+        and the shifts are combined using confidence-weighted averaging."""
         h, w = img_np.shape[:2]
         
         if len(img_np.shape) == 3:
@@ -1211,118 +1233,141 @@ class OMRSoftware(QMainWindow):
         else:
             gray = img_np.copy()
         
-        ref_x, ref_y = self.align_template_pos
-        ref_w, ref_h = self.align_template_size
-        
         # Adaptive margin based on image size (larger images may have larger shifts)
         margin = max(120, min(int(min(w, h) * 0.08), 250))
         
-        search_x1 = max(0, ref_x - margin)
-        search_y1 = max(0, ref_y - margin)
-        search_x2 = min(w, ref_x + ref_w + margin)
-        search_y2 = min(h, ref_y + ref_h + margin)
+        # Match each template and collect shift estimates
+        shift_estimates = []  # List of (dx, dy, confidence, template_idx)
         
-        search_gray = gray[search_y1:search_y2, search_x1:search_x2]
+        for t_idx, tmpl in enumerate(self.align_templates):
+            ref_x, ref_y = tmpl['pos']
+            ref_w, ref_h = tmpl['size']
+            
+            search_x1 = max(0, ref_x - margin)
+            search_y1 = max(0, ref_y - margin)
+            search_x2 = min(w, ref_x + ref_w + margin)
+            search_y2 = min(h, ref_y + ref_h + margin)
+            
+            search_gray = gray[search_y1:search_y2, search_x1:search_x2]
+            
+            template_h, template_w = tmpl['gray'].shape[:2]
+            
+            if search_gray.shape[0] < template_h or search_gray.shape[1] < template_w:
+                print(f"  Template align #{t_idx+1}: Search region too small, skipping")
+                continue
+            
+            # === Strategy 1: Edge-based matching (primary - most robust) ===
+            search_edges = cv2.Canny(search_gray, 50, 150)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            search_edges = cv2.dilate(search_edges, kernel, iterations=1)
+            
+            edge_result = cv2.matchTemplate(search_edges, tmpl['edges'], cv2.TM_CCOEFF_NORMED)
+            _, edge_max_val, _, edge_max_loc = cv2.minMaxLoc(edge_result)
+            
+            # === Strategy 2: CLAHE-enhanced matching (secondary verification) ===
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            search_clahe = clahe.apply(search_gray)
+            
+            clahe_result = cv2.matchTemplate(search_clahe, tmpl['clahe'], cv2.TM_CCOEFF_NORMED)
+            _, clahe_max_val, _, clahe_max_loc = cv2.minMaxLoc(clahe_result)
+            
+            # === Strategy 3: Raw grayscale matching (fallback) ===
+            gray_result = cv2.matchTemplate(search_gray, tmpl['gray'], cv2.TM_CCOEFF_NORMED)
+            _, gray_max_val, _, gray_max_loc = cv2.minMaxLoc(gray_result)
+            
+            print(f"  Template align #{t_idx+1}: Page {page_idx+1}, confidence - edge={edge_max_val:.3f}, clahe={clahe_max_val:.3f}, gray={gray_max_val:.3f}")
+            
+            # === Select best result with cross-validation ===
+            candidates = [
+                ("edge", edge_max_val, edge_max_loc, edge_result),
+                ("clahe", clahe_max_val, clahe_max_loc, clahe_result),
+                ("gray", gray_max_val, gray_max_loc, gray_result),
+            ]
+            
+            candidates.sort(key=lambda c: c[1], reverse=True)
+            
+            best_name, best_val, best_loc, best_result = candidates[0]
+            second_name, second_val, second_loc, _ = candidates[1]
+            
+            loc_diff = abs(best_loc[0] - second_loc[0]) + abs(best_loc[1] - second_loc[1])
+            
+            if best_val < 0.3:
+                print(f"  Template align #{t_idx+1}: Low confidence (best={best_val:.3f}), skipping this mark")
+                continue
+            
+            # If methods disagree significantly, prefer edge-based (more robust)
+            if loc_diff > 10 and edge_max_val > 0.3:
+                best_name, best_val, best_loc, best_result = candidates[0] if candidates[0][0] == "edge" else \
+                    next((c for c in candidates if c[0] == "edge"), candidates[0])
+            
+            # Sub-pixel refinement
+            px, py = best_loc
+            sub_px, sub_py = self._subpixel_refine(best_result, px, py)
+            
+            # Convert to full image coordinates
+            match_x = search_x1 + sub_px
+            match_y = search_y1 + sub_py
+            
+            # Calculate translation shift
+            t_dx = ref_x - match_x
+            t_dy = ref_y - match_y
+            
+            # Confidence adjustment
+            effective_confidence = best_val
+            if loc_diff <= 5 and second_val > 0.3:
+                effective_confidence = min(1.0, best_val * 1.1)
+            
+            # Sanity check
+            max_allowed_shift = margin - 10
+            if abs(t_dx) > max_allowed_shift or abs(t_dy) > max_allowed_shift:
+                print(f"  Template align #{t_idx+1}: Shift ({t_dx:.2f},{t_dy:.2f}) too large, skipping this mark")
+                continue
+            
+            print(f"  Template align #{t_idx+1}: Best ({best_name}) shift=({t_dx:.2f},{t_dy:.2f}), conf={effective_confidence:.3f}")
+            shift_estimates.append((t_dx, t_dy, effective_confidence, t_idx))
         
-        template_h, template_w = self.align_template.shape[:2]
-        
-        print(f"  Template align: Page {page_idx+1}, ref pos=({ref_x},{ref_y}), margin={margin}px")
-        print(f"  Template align: Template={template_w}x{template_h}, search={search_gray.shape[1]}x{search_gray.shape[0]}")
-        
-        if search_gray.shape[0] < template_h or search_gray.shape[1] < template_w:
-            print("  Template align: Search region too small")
+        # === Combine shift estimates from all templates ===
+        if not shift_estimates:
+            print(f"  Template align: No valid matches on page {page_idx+1}, trying phase correlation fallback...")
+            fallback_result = self._align_phase_correlation_fallback(img_np, gray, page_idx)
+            if fallback_result is not None:
+                return fallback_result
             return img_np, (0.0, 0.0), 0.0
         
-        # === Strategy 1: Edge-based matching (primary - most robust) ===
-        search_edges = cv2.Canny(search_gray, 50, 150)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        search_edges = cv2.dilate(search_edges, kernel, iterations=1)
-        
-        edge_result = cv2.matchTemplate(search_edges, self.align_template_edges, cv2.TM_CCOEFF_NORMED)
-        _, edge_max_val, _, edge_max_loc = cv2.minMaxLoc(edge_result)
-        
-        # === Strategy 2: CLAHE-enhanced matching (secondary verification) ===
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        search_clahe = clahe.apply(search_gray)
-        
-        clahe_result = cv2.matchTemplate(search_clahe, self.align_template_clahe, cv2.TM_CCOEFF_NORMED)
-        _, clahe_max_val, _, clahe_max_loc = cv2.minMaxLoc(clahe_result)
-        
-        # === Strategy 3: Raw grayscale matching (fallback) ===
-        gray_result = cv2.matchTemplate(search_gray, self.align_template, cv2.TM_CCOEFF_NORMED)
-        _, gray_max_val, _, gray_max_loc = cv2.minMaxLoc(gray_result)
-        
-        print(f"  Template align: Confidence - edge={edge_max_val:.3f}, clahe={clahe_max_val:.3f}, gray={gray_max_val:.3f}")
-        
-        # === Select best result with cross-validation ===
-        candidates = [
-            ("edge", edge_max_val, edge_max_loc, edge_result),
-            ("clahe", clahe_max_val, clahe_max_loc, clahe_result),
-            ("gray", gray_max_val, gray_max_loc, gray_result),
-        ]
-        
-        # Sort by confidence
-        candidates.sort(key=lambda c: c[1], reverse=True)
-        
-        # Check agreement between top methods
-        # If the top 2 methods agree within 5 pixels, we have high confidence
-        best_name, best_val, best_loc, best_result = candidates[0]
-        second_name, second_val, second_loc, _ = candidates[1]
-        
-        loc_diff = abs(best_loc[0] - second_loc[0]) + abs(best_loc[1] - second_loc[1])
-        
-        if best_val < 0.3:
-            print(f"  Template align: All methods low confidence (best={best_val:.3f}), skipping")
-            return img_np, (0.0, 0.0), best_val
-        
-        # If methods disagree significantly, prefer edge-based (more robust)
-        if loc_diff > 10 and edge_max_val > 0.3:
-            print(f"  Template align: Methods disagree by {loc_diff:.0f}px, using edge-based result")
-            best_name, best_val, best_loc, best_result = candidates[0] if candidates[0][0] == "edge" else \
-                next((c for c in candidates if c[0] == "edge"), candidates[0])
-        elif loc_diff <= 5:
-            print(f"  Template align: Methods agree within {loc_diff:.0f}px ✓")
+        if len(shift_estimates) == 1:
+            dx, dy, effective_confidence, _ = shift_estimates[0]
+            print(f"  Template align: Using single template shift=({dx:.2f},{dy:.2f})")
         else:
-            print(f"  Template align: Methods differ by {loc_diff:.0f}px, using {best_name} (highest confidence)")
-        
-        # === Sub-pixel refinement using 2D quadratic fitting ===
-        px, py = best_loc
-        sub_px, sub_py = self._subpixel_refine(best_result, px, py)
-        
-        # Convert to full image coordinates
-        match_x = search_x1 + sub_px
-        match_y = search_y1 + sub_py
-        
-        # Calculate translation shift
-        dx = ref_x - match_x
-        dy = ref_y - match_y
-        
-        print(f"  Template align: Best match ({best_name}) at ({match_x:.2f},{match_y:.2f}), shift=({dx:.2f},{dy:.2f})")
-        
-        # Confidence check
-        effective_confidence = best_val
-        if loc_diff <= 5 and second_val > 0.3:
-            # Boost confidence when methods agree
-            effective_confidence = min(1.0, best_val * 1.1)
+            # Weighted average of shifts by confidence
+            total_weight = sum(conf for _, _, conf, _ in shift_estimates)
+            dx = sum(sdx * conf for sdx, _, conf, _ in shift_estimates) / total_weight
+            dy = sum(sdy * conf for _, sdy, conf, _ in shift_estimates) / total_weight
+            effective_confidence = total_weight / len(shift_estimates)
+            
+            # Check consistency: if shifts disagree by more than 5px, use median instead
+            dxs = [sdx for sdx, _, _, _ in shift_estimates]
+            dys = [sdy for _, sdy, _, _ in shift_estimates]
+            dx_range = max(dxs) - min(dxs)
+            dy_range = max(dys) - min(dys)
+            
+            if dx_range > 5 or dy_range > 5:
+                print(f"  Template align: Shift estimates disagree (dx_range={dx_range:.1f}, dy_range={dy_range:.1f}), using median")
+                dxs.sort()
+                dys.sort()
+                dx = dxs[len(dxs) // 2]
+                dy = dys[len(dys) // 2]
+                effective_confidence *= 0.8  # Reduce confidence due to disagreement
+            else:
+                print(f"  Template align: {len(shift_estimates)} templates agree (dx_range={dx_range:.1f}, dy_range={dy_range:.1f}) ✓")
         
         if effective_confidence < 0.35:
-            print(f"  Template align: Low confidence ({effective_confidence:.3f}), trying phase correlation fallback...")
+            print(f"  Template align: Low combined confidence ({effective_confidence:.3f}), trying phase correlation fallback...")
             fallback_result = self._align_phase_correlation_fallback(img_np, gray, page_idx)
             if fallback_result is not None:
                 return fallback_result
             return img_np, (0.0, 0.0), effective_confidence
         
-        # Sanity check on shift magnitude
-        max_allowed_shift = margin - 10
-        if abs(dx) > max_allowed_shift or abs(dy) > max_allowed_shift:
-            print(f"  Template align: Shift ({dx:.2f},{dy:.2f}) exceeds ±{max_allowed_shift}, trying phase correlation fallback...")
-            fallback_result = self._align_phase_correlation_fallback(img_np, gray, page_idx)
-            if fallback_result is not None:
-                return fallback_result
-            return img_np, (0.0, 0.0), 0.3
-        
         # === Rotation detection and correction ===
-        # Try small rotation angles to see if alignment improves
         rotation_angle = self._detect_rotation(gray, dx, dy, page_idx)
         
         # Skip if both shift and rotation are negligible
@@ -1339,7 +1384,6 @@ class OMRSoftware(QMainWindow):
         center = (w / 2.0, h / 2.0)
         
         if abs(rotation_angle) >= 0.02:
-            # Combined rotation + translation
             R = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
             R[0, 2] += dx
             R[1, 2] += dy
@@ -1349,7 +1393,6 @@ class OMRSoftware(QMainWindow):
                                       borderValue=border_value)
             print(f"  Template align: ✓ Applied dx={dx:.2f}, dy={dy:.2f}, rotation={rotation_angle:.3f}°")
         else:
-            # Translation only (faster)
             M = np.float32([[1, 0, dx], [0, 1, dy]])
             aligned = cv2.warpAffine(img_np, M, (w, h),
                                       flags=cv2.INTER_LINEAR,
@@ -1406,8 +1449,13 @@ class OMRSoftware(QMainWindow):
         if not hasattr(self, 'align_ref_full_gray') or self.align_ref_full_gray is None:
             return 0.0
         
-        ref_x, ref_y = self.align_template_pos
-        ref_w, ref_h = self.align_template_size
+        if not self.align_templates:
+            return 0.0
+        
+        # Use the first (or largest) template for rotation detection
+        tmpl = self.align_templates[0]
+        ref_x, ref_y = tmpl['pos']
+        ref_w, ref_h = tmpl['size']
         
         # Use a larger region around the template for rotation detection
         # (rotation is more visible over larger distances)
@@ -1600,8 +1648,8 @@ class OMRSoftware(QMainWindow):
         return aligned, (dx, dy), confidence
 
     def _verify_alignment_quality(self, aligned_img, page_idx):
-        """Verify alignment quality by matching template in the corrected image."""
-        if not hasattr(self, 'align_template') or self.align_template is None:
+        """Verify alignment quality by matching all templates in the corrected image."""
+        if not hasattr(self, 'align_templates') or not self.align_templates:
             return 0.5
         
         if len(aligned_img.shape) == 3:
@@ -1609,27 +1657,33 @@ class OMRSoftware(QMainWindow):
         else:
             gray = aligned_img.copy()
         
-        ref_x, ref_y = self.align_template_pos
-        ref_w, ref_h = self.align_template_size
-        
-        # Small search region around expected position
         margin = 30
         h, w = gray.shape[:2]
-        sx1 = max(0, ref_x - margin)
-        sy1 = max(0, ref_y - margin)
-        sx2 = min(w, ref_x + ref_w + margin)
-        sy2 = min(h, ref_y + ref_h + margin)
+        confidences = []
         
-        search_region = gray[sy1:sy2, sx1:sx2]
-        template_h, template_w = self.align_template.shape[:2]
+        for tmpl in self.align_templates:
+            ref_x, ref_y = tmpl['pos']
+            ref_w, ref_h = tmpl['size']
+            
+            sx1 = max(0, ref_x - margin)
+            sy1 = max(0, ref_y - margin)
+            sx2 = min(w, ref_x + ref_w + margin)
+            sy2 = min(h, ref_y + ref_h + margin)
+            
+            search_region = gray[sy1:sy2, sx1:sx2]
+            template_h, template_w = tmpl['gray'].shape[:2]
+            
+            if search_region.shape[0] < template_h or search_region.shape[1] < template_w:
+                continue
+            
+            result = cv2.matchTemplate(search_region, tmpl['gray'], cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+            confidences.append(max_val)
         
-        if search_region.shape[0] < template_h or search_region.shape[1] < template_w:
+        if not confidences:
             return 0.0
         
-        result = cv2.matchTemplate(search_region, self.align_template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, _ = cv2.minMaxLoc(result)
-        
-        return max_val
+        return sum(confidences) / len(confidences)
     
     def _find_table_bounds(self, img_np):
         """
@@ -2444,13 +2498,19 @@ class OMRSoftware(QMainWindow):
                     self.view.option_marks.append(item)
                     self.scene.addItem(item)
                     self.view.option_counter = max(self.view.option_counter, m['question'] + 1)
-                align_data = saved_marks_data.get("align_mark")
-                if align_data:
-                    item = MarkItem(0, 0, align_data['width'], align_data['height'], MARK_TYPE_ALIGN,
-                                   align_data.get('question', 1), align_data.get('label', ''), view_ref=self.view)
-                    item.setPos(align_data['x'], align_data['y'])
-                    self.view.align_mark = item
+                align_marks_data = saved_marks_data.get("align_marks", [])
+                # Backward compat: load old single "align_mark" format
+                if not align_marks_data:
+                    old_align = saved_marks_data.get("align_mark")
+                    if old_align:
+                        align_marks_data = [old_align]
+                for ad in align_marks_data:
+                    item = MarkItem(0, 0, ad['width'], ad['height'], MARK_TYPE_ALIGN,
+                                   ad.get('question', self.view.align_counter), ad.get('label', ''), view_ref=self.view)
+                    item.setPos(ad['x'], ad['y'])
+                    self.view.align_marks.append(item)
                     self.scene.addItem(item)
+                    self.view.align_counter = max(self.view.align_counter, ad.get('question', 1) + 1)
             self.load_page(saved_page, apply_corrections=False)
             self.update_result_table()
 
@@ -2526,15 +2586,7 @@ class OMRSoftware(QMainWindow):
                 self.pdf_document = fitz.open(fname)
                 self.current_page = 0
                 # Reset all alignment references when loading new PDF
-                self.align_reference_gray = None
-                self.align_reference_size = None
-                self.align_reference_bounds = None
-                self.align_template = None
-                self.align_template_edges = None
-                self.align_template_clahe = None
-                self.align_template_pos = None
-                self.align_template_size = None
-                self.align_ref_full_gray = None
+                self._reset_align_templates()
                 # Load first page with corrections to initialize alignment reference
                 self.load_page(0, apply_corrections=True)
             except Exception as e:
@@ -2916,9 +2968,9 @@ class OMRSoftware(QMainWindow):
                 if skew_angle != 0.0:
                     correction_info.append(f"Deskew: {skew_angle:.2f}°")
             
-            # Apply auto-align (shift) if enabled and alignment mark exists
+            # Apply auto-align (shift) if enabled and alignment mark(s) exist
             if hasattr(self, 'check_auto_align') and self.check_auto_align.isChecked():
-                if hasattr(self, 'view') and self.view.align_mark is not None:
+                if hasattr(self, 'view') and len(self.view.align_marks) > 0:
                     # Page 0 initializes the template, other pages get aligned
                     img_np, (dx, dy), confidence = self.align_image(img_np, p_idx)
                     if p_idx == 0:
@@ -2963,9 +3015,10 @@ class OMRSoftware(QMainWindow):
             if m.scene() is None:
                 self.scene.addItem(m)
         
-        # Ensure alignment mark is in the scene
-        if self.view.align_mark is not None and self.view.align_mark.scene() is None:
-            self.scene.addItem(self.view.align_mark)
+        # Ensure alignment marks are in the scene
+        for m in self.view.align_marks:
+            if m.scene() is None:
+                self.scene.addItem(m)
 
         # Update table for this page result if available
         self.update_result_table()
@@ -2981,16 +3034,11 @@ class OMRSoftware(QMainWindow):
     def undo_last_mark(self):
         """Remove the last added mark (option or text) and restore counter"""
         if not hasattr(self.view, 'mark_history') or not self.view.mark_history:
-            # Check if there are any marks to remove
-            if self.view.align_mark:
-                self.scene.removeItem(self.view.align_mark)
-                self.view.align_mark = None
-                self.align_template = None
-                self.align_template_edges = None
-                self.align_template_clahe = None
-                self.align_template_pos = None
-                self.align_template_size = None
-                self.align_ref_full_gray = None
+            # Check if there are any alignment marks to remove
+            if self.view.align_marks:
+                removed = self.view.align_marks.pop()
+                self.scene.removeItem(removed)
+                self._reset_align_templates()
                 print("Undo: Removed alignment mark")
             else:
                 print("Undo: No marks to remove")
@@ -3008,15 +3056,10 @@ class OMRSoftware(QMainWindow):
             # Restore counter to the removed item's question number
             self.view.option_counter = last_mark.question_num
             print(f"Undo: Removed option mark Q{last_mark.question_num} ('{last_mark.label}'), counter reset to {self.view.option_counter}")
-        elif last_mark == self.view.align_mark:
-            self.view.align_mark = None
+        elif last_mark in self.view.align_marks:
+            self.view.align_marks.remove(last_mark)
             # Also reset alignment template
-            self.align_template = None
-            self.align_template_edges = None
-            self.align_template_clahe = None
-            self.align_template_pos = None
-            self.align_template_size = None
-            self.align_ref_full_gray = None
+            self._reset_align_templates()
             print("Undo: Removed alignment mark")
         
         self.scene.removeItem(last_mark)
@@ -3024,23 +3067,17 @@ class OMRSoftware(QMainWindow):
     def clear_all_marks(self):
         for m in self.view.text_marks + self.view.option_marks:
             self.scene.removeItem(m)
-        if self.view.align_mark is not None:
-            self.scene.removeItem(self.view.align_mark)
-            self.view.align_mark = None
+        for m in self.view.align_marks:
+            self.scene.removeItem(m)
+        self.view.align_marks.clear()
         self.view.text_marks.clear()
         self.view.option_marks.clear()
         self.view.mark_history.clear()  # Clear undo history
         self.view.text_counter = 1
         self.view.option_counter = 1
+        self.view.align_counter = 1
         # Reset alignment reference
-        self.align_reference_gray = None
-        self.align_reference_bounds = None
-        self.align_template = None
-        self.align_template_edges = None
-        self.align_template_clahe = None
-        self.align_template_pos = None
-        self.align_template_size = None
-        self.align_ref_full_gray = None
+        self._reset_align_templates()
 
     def export_template(self):
         data = self.view.get_all_marks_data()
@@ -3070,14 +3107,20 @@ class OMRSoftware(QMainWindow):
                 self.scene.addItem(item)
                 self.view.option_counter = max(self.view.option_counter, m['question'] + 1)
             
-            # Load alignment mark if exists
-            align_data = data.get("align_mark")
-            if align_data:
-                item = MarkItem(0, 0, align_data['width'], align_data['height'], MARK_TYPE_ALIGN, 
-                               align_data.get('question', 1), align_data.get('label', ''), view_ref=self.view)
-                item.setPos(align_data['x'], align_data['y'])
-                self.view.align_mark = item
+            # Load alignment marks (supports both new list and old single format)
+            align_marks_data = data.get("align_marks", [])
+            # Backward compat: load old single "align_mark" format
+            if not align_marks_data:
+                old_align = data.get("align_mark")
+                if old_align:
+                    align_marks_data = [old_align]
+            for ad in align_marks_data:
+                item = MarkItem(0, 0, ad['width'], ad['height'], MARK_TYPE_ALIGN, 
+                               ad.get('question', self.view.align_counter), ad.get('label', ''), view_ref=self.view)
+                item.setPos(ad['x'], ad['y'])
+                self.view.align_marks.append(item)
                 self.scene.addItem(item)
+                self.view.align_counter = max(self.view.align_counter, ad.get('question', 1) + 1)
 
     def run_recognition_all(self):
         if not self.pdf_document: 
@@ -3095,14 +3138,7 @@ class OMRSoftware(QMainWindow):
             self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
         
         # Reset alignment template for new recognition run
-        self.align_template = None
-        self.align_template_edges = None
-        self.align_template_clahe = None
-        self.align_template_pos = None
-        self.align_template_size = None
-        self.align_ref_full_gray = None
-        self.align_reference_gray = None
-        self.align_reference_bounds = None
+        self._reset_align_templates()
         
         # Progress Dialog
         progress = QtWidgets.QProgressDialog("Recognizing...", "Cancel", 0, len(self.pdf_document), self)
@@ -3301,14 +3337,7 @@ class OMRSoftware(QMainWindow):
         # For single page or partial re-recognition, we don't reset alignment template
         # unless we're processing from page 0
         if 0 in pages_to_process:
-            self.align_template = None
-            self.align_template_edges = None
-            self.align_template_clahe = None
-            self.align_template_pos = None
-            self.align_template_size = None
-            self.align_ref_full_gray = None
-            self.align_reference_gray = None
-            self.align_reference_bounds = None
+            self._reset_align_templates()
 
         progress = QtWidgets.QProgressDialog("Recognizing...", "Cancel", 0, len(pages_to_process), self)
         progress.setWindowModality(Qt.WindowModal)
@@ -3657,14 +3686,7 @@ class OMRSoftware(QMainWindow):
         os.makedirs(folder, exist_ok=True)
         
         # Reset alignment template for export
-        self.align_template = None
-        self.align_template_edges = None
-        self.align_template_clahe = None
-        self.align_template_pos = None
-        self.align_template_size = None
-        self.align_ref_full_gray = None
-        self.align_reference_gray = None
-        self.align_reference_bounds = None
+        self._reset_align_templates()
         
         from PyQt5.QtWidgets import QProgressDialog
         progress = QProgressDialog("Exporting images...", "Cancel", 0, len(self.pdf_document), self)
@@ -4015,12 +4037,7 @@ class OMRSoftware(QMainWindow):
                 self.load_page(0)
                 
                 # Reset alignment template for new PDF
-                self.align_template = None
-                self.align_template_edges = None
-                self.align_template_clahe = None
-                self.align_template_pos = None
-                self.align_template_size = None
-                self.align_ref_full_gray = None
+                self._reset_align_templates()
                 
                 # Run recognition
                 self._run_recognition_internal()
@@ -4096,12 +4113,7 @@ class OMRSoftware(QMainWindow):
                 self.load_page(0)
                 
                 # Reset alignment template for new PDF
-                self.align_template = None
-                self.align_template_edges = None
-                self.align_template_clahe = None
-                self.align_template_pos = None
-                self.align_template_size = None
-                self.align_ref_full_gray = None
+                self._reset_align_templates()
                 
                 # Run recognition
                 self._run_recognition_internal()
@@ -4161,14 +4173,20 @@ class OMRSoftware(QMainWindow):
             self.scene.addItem(item)
             self.view.option_counter = max(self.view.option_counter, m['question'] + 1)
         
-        # Load alignment mark if exists
-        align_data = data.get("align_mark")
-        if align_data:
-            item = MarkItem(0, 0, align_data['width'], align_data['height'], MARK_TYPE_ALIGN, 
-                           align_data.get('question', 1), align_data.get('label', ''), view_ref=self.view)
-            item.setPos(align_data['x'], align_data['y'])
-            self.view.align_mark = item
+        # Load alignment marks (supports both new list and old single format)
+        align_marks_data = data.get("align_marks", [])
+        # Backward compat: load old single "align_mark" format
+        if not align_marks_data:
+            old_align = data.get("align_mark")
+            if old_align:
+                align_marks_data = [old_align]
+        for ad in align_marks_data:
+            item = MarkItem(0, 0, ad['width'], ad['height'], MARK_TYPE_ALIGN, 
+                           ad.get('question', self.view.align_counter), ad.get('label', ''), view_ref=self.view)
+            item.setPos(ad['x'], ad['y'])
+            self.view.align_marks.append(item)
             self.scene.addItem(item)
+            self.view.align_counter = max(self.view.align_counter, ad.get('question', 1) + 1)
     
     def _run_recognition_internal(self):
         """Internal recognition method without UI dialogs."""
@@ -4183,14 +4201,7 @@ class OMRSoftware(QMainWindow):
             self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
         
         # Reset alignment template for new recognition run
-        self.align_template = None
-        self.align_template_edges = None
-        self.align_template_clahe = None
-        self.align_template_pos = None
-        self.align_template_size = None
-        self.align_ref_full_gray = None
-        self.align_reference_gray = None
-        self.align_reference_bounds = None
+        self._reset_align_templates()
         
         for p_idx in range(len(self.pdf_document)):
             QtWidgets.QApplication.processEvents()
@@ -4496,14 +4507,7 @@ class OMRSoftware(QMainWindow):
         os.makedirs(output_folder, exist_ok=True)
         
         # Reset alignment template for export
-        self.align_template = None
-        self.align_template_edges = None
-        self.align_template_clahe = None
-        self.align_template_pos = None
-        self.align_template_size = None
-        self.align_ref_full_gray = None
-        self.align_reference_gray = None
-        self.align_reference_bounds = None
+        self._reset_align_templates()
         
         total_pages = len(self.pdf_document)
         for page_idx in range(total_pages):
