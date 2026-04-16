@@ -48,6 +48,8 @@ from openpyxl import Workbook
 from openpyxl.styles import Font as XLFont, Alignment, Border, Side
 
 import urllib.request
+import tempfile
+import subprocess
 
 # Mark types
 MARK_TYPE_TEXT = "text"      # Text field (e.g., student name, ID)
@@ -55,7 +57,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -63,9 +65,9 @@ GITHUB_REPO = "kenkmc/MC_marking"
 
 class UpdateChecker(QThread):
     """Background thread to check GitHub releases for updates."""
-    update_available = pyqtSignal(str, str)   # (latest_version, download_url)
-    no_update = pyqtSignal(str)               # current_version
-    check_failed = pyqtSignal(str)            # error_message
+    update_available = pyqtSignal(str, str, str)  # (latest_version, html_url, asset_url)
+    no_update = pyqtSignal(str)                   # current_version
+    check_failed = pyqtSignal(str)                # error_message
 
     def run(self):
         try:
@@ -75,8 +77,14 @@ class UpdateChecker(QThread):
                 data = json.loads(resp.read().decode())
             tag = data.get("tag_name", "").lstrip("vV")
             html_url = data.get("html_url", "")
+            # Find the .zip asset download URL for auto-update
+            asset_url = ""
+            for asset in data.get("assets", []):
+                if asset.get("name", "").lower().endswith(".zip"):
+                    asset_url = asset.get("browser_download_url", "")
+                    break
             if self._is_newer(tag, APP_VERSION):
-                self.update_available.emit(tag, html_url)
+                self.update_available.emit(tag, html_url, asset_url)
             else:
                 self.no_update.emit(APP_VERSION)
         except Exception as e:
@@ -91,6 +99,53 @@ class UpdateChecker(QThread):
             return r_parts > l_parts
         except ValueError:
             return False
+
+
+class UpdateDownloader(QThread):
+    """Background thread to download an update zip file."""
+    progress = pyqtSignal(int, int)       # (bytes_downloaded, total_bytes)
+    download_complete = pyqtSignal(str)   # temp_zip_path
+    download_failed = pyqtSignal(str)     # error_message
+
+    def __init__(self, url, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def run(self):
+        tmp_path = None
+        try:
+            req = urllib.request.Request(self._url, headers={"User-Agent": "CheckMate-Updater"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                tmp_fd, tmp_path = tempfile.mkstemp(suffix=".zip", prefix="checkmate_update_")
+                with os.fdopen(tmp_fd, 'wb') as f:
+                    downloaded = 0
+                    while True:
+                        if self._cancelled:
+                            try:
+                                os.unlink(tmp_path)
+                            except OSError:
+                                pass
+                            return
+                        chunk = resp.read(256 * 1024)  # 256 KB chunks
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        self.progress.emit(downloaded, total)
+            self.download_complete.emit(tmp_path)
+        except Exception as e:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            if not self._cancelled:
+                self.download_failed.emit(str(e))
 
 # ── i18n Translation System ──
 _TRANSLATIONS = {
@@ -200,7 +255,15 @@ _TRANSLATIONS = {
         "menu_check_update": "Check for Update",
         "chk_auto_update": "Check for updates on startup",
         "update_title": "Update Available",
-        "update_msg": "A new version of CheckMate is available!\n\nCurrent version: v{current}\nLatest version: v{latest}\n\nWould you like to open the download page?",
+        "update_msg": "A new version of CheckMate is available!\n\nCurrent version: v{current}\nLatest version: v{latest}",
+        "update_auto_btn": "Update Now",
+        "update_manual_btn": "Open Download Page",
+        "update_downloading": "Downloading CheckMate v{version}...",
+        "update_extracting": "Extracting update...",
+        "update_restart_title": "Update Ready",
+        "update_restart_msg": "Update downloaded successfully!\nThe application will now restart to apply the update.",
+        "update_download_failed_title": "Download Failed",
+        "update_download_failed": "Failed to download update:\n{error}",
         "update_no_update": "You are using the latest version (v{version}).",
         "update_no_update_title": "No Update Available",
         "update_check_failed": "Could not check for updates.\nPlease check your internet connection.",
@@ -312,7 +375,15 @@ _TRANSLATIONS = {
         "menu_check_update": "檢查更新",
         "chk_auto_update": "啟動時自動檢查更新",
         "update_title": "有可用更新",
-        "update_msg": "CheckMate 有新版本可用！\n\n目前版本：v{current}\n最新版本：v{latest}\n\n是否要開啟下載頁面？",
+        "update_msg": "CheckMate 有新版本可用！\n\n目前版本：v{current}\n最新版本：v{latest}",
+        "update_auto_btn": "立即更新",
+        "update_manual_btn": "開啟下載頁面",
+        "update_downloading": "正在下載 CheckMate v{version}...",
+        "update_extracting": "正在解壓更新...",
+        "update_restart_title": "更新就緒",
+        "update_restart_msg": "更新下載完成！\n應用程式將立即重新啟動以套用更新。",
+        "update_download_failed_title": "下載失敗",
+        "update_download_failed": "下載更新失敗：\n{error}",
         "update_no_update": "您已使用最新版本（v{version}）。",
         "update_no_update_title": "沒有可用更新",
         "update_check_failed": "無法檢查更新。\n請確認網路連線。",
@@ -2535,16 +2606,139 @@ class OMRSoftware(QMainWindow):
         self._update_thread.check_failed.connect(self._on_update_failed)
         self._update_thread.start()
 
-    def _on_update_available(self, latest, url):
-        reply = QMessageBox.information(
-            self,
-            tr("update_title"),
-            tr("update_msg", current=APP_VERSION, latest=latest),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+    def _on_update_available(self, latest, html_url, asset_url):
+        is_frozen = getattr(sys, 'frozen', False)
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(tr("update_title"))
+        msg_box.setText(tr("update_msg", current=APP_VERSION, latest=latest))
+        msg_box.setIcon(QMessageBox.Information)
+        if is_frozen and asset_url:
+            btn_auto = msg_box.addButton(tr("update_auto_btn"), QMessageBox.AcceptRole)
+            btn_manual = msg_box.addButton(tr("update_manual_btn"), QMessageBox.ActionRole)
+        else:
+            btn_auto = None
+            btn_manual = msg_box.addButton(tr("update_manual_btn"), QMessageBox.AcceptRole)
+        msg_box.addButton(QMessageBox.Cancel)
+        msg_box.setDefaultButton(btn_auto if btn_auto else btn_manual)
+        msg_box.exec_()
+        clicked = msg_box.clickedButton()
+        if clicked == btn_auto:
+            self._start_auto_update(asset_url, latest)
+        elif clicked == btn_manual:
+            QDesktopServices.openUrl(QUrl(html_url))
+
+    def _start_auto_update(self, asset_url, version):
+        """Start downloading the update zip in the background."""
+        self._update_version = version
+        self._update_progress_dlg = QtWidgets.QProgressDialog(
+            tr("update_downloading", version=version),
+            tr("btn_clear"),  # Cancel button text
+            0, 100, self
         )
-        if reply == QMessageBox.Yes:
-            QDesktopServices.openUrl(QUrl(url))
+        self._update_progress_dlg.setWindowTitle(tr("update_title"))
+        self._update_progress_dlg.setWindowModality(Qt.WindowModal)
+        self._update_progress_dlg.setAutoClose(False)
+        self._update_progress_dlg.setAutoReset(False)
+        self._update_progress_dlg.setMinimumDuration(0)
+        self._update_progress_dlg.setValue(0)
+
+        self._downloader = UpdateDownloader(asset_url)
+        self._downloader.progress.connect(self._on_download_progress)
+        self._downloader.download_complete.connect(self._on_download_complete)
+        self._downloader.download_failed.connect(self._on_download_failed)
+        self._update_progress_dlg.canceled.connect(self._downloader.cancel)
+        self._downloader.start()
+
+    def _on_download_progress(self, downloaded, total):
+        if hasattr(self, '_update_progress_dlg') and self._update_progress_dlg is not None:
+            if total > 0:
+                pct = min(int(downloaded * 100 / total), 99)
+                self._update_progress_dlg.setValue(pct)
+                mb_done = downloaded / (1024 * 1024)
+                mb_total = total / (1024 * 1024)
+                self._update_progress_dlg.setLabelText(
+                    f"{tr('update_downloading', version=self._update_version)}\n"
+                    f"{mb_done:.1f} / {mb_total:.1f} MB"
+                )
+
+    def _on_download_complete(self, zip_path):
+        if hasattr(self, '_update_progress_dlg') and self._update_progress_dlg is not None:
+            self._update_progress_dlg.setValue(100)
+            self._update_progress_dlg.setLabelText(tr("update_extracting"))
+        QtWidgets.QApplication.processEvents()
+        try:
+            self._apply_update(zip_path)
+        except Exception as e:
+            if hasattr(self, '_update_progress_dlg') and self._update_progress_dlg is not None:
+                self._update_progress_dlg.close()
+            QMessageBox.warning(self, tr("update_download_failed_title"),
+                                tr("update_download_failed", error=str(e)))
+
+    def _on_download_failed(self, error):
+        if hasattr(self, '_update_progress_dlg') and self._update_progress_dlg is not None:
+            self._update_progress_dlg.close()
+        QMessageBox.warning(self, tr("update_download_failed_title"),
+                            tr("update_download_failed", error=error))
+
+    def _apply_update(self, zip_path):
+        """Extract downloaded zip, create updater script, launch it, and exit."""
+        # Determine the application directory
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Extract to a temporary directory
+        extract_dir = tempfile.mkdtemp(prefix="checkmate_update_")
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(extract_dir)
+        except Exception:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            raise
+
+        # Build the updater batch script
+        pid = os.getpid()
+        exe_name = os.path.basename(sys.executable)
+        updater_path = os.path.join(tempfile.gettempdir(), "checkmate_updater.bat")
+        # Use raw strings in the batch script; Python f-string fills values
+        script_lines = [
+            '@echo off',
+            'chcp 65001 >nul 2>&1',
+            'echo Waiting for CheckMate to exit...',
+            ':wait',
+            f'tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL',
+            'if not errorlevel 1 (',
+            '    timeout /t 1 /nobreak >NUL',
+            '    goto wait',
+            ')',
+            'timeout /t 2 /nobreak >NUL',
+            'echo Applying update...',
+            f'rd /s /q "{app_dir}\\_internal" 2>NUL',
+            f'del /f /q "{app_dir}\\{exe_name}" 2>NUL',
+            f'xcopy /s /e /y /q "{extract_dir}\\*" "{app_dir}\\"',
+            'echo Starting updated CheckMate...',
+            f'start "" "{app_dir}\\{exe_name}"',
+            f'rd /s /q "{extract_dir}" 2>NUL',
+            f'del /f /q "{zip_path}" 2>NUL',
+        ]
+        with open(updater_path, 'w', encoding='utf-8') as f:
+            f.write('\r\n'.join(script_lines) + '\r\n')
+
+        # Close the progress dialog
+        if hasattr(self, '_update_progress_dlg') and self._update_progress_dlg is not None:
+            self._update_progress_dlg.close()
+
+        # Notify user
+        QMessageBox.information(self, tr("update_restart_title"),
+                                tr("update_restart_msg"))
+
+        # Launch the updater script and exit the application
+        subprocess.Popen(
+            ['cmd', '/c', updater_path],
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        QtWidgets.QApplication.quit()
 
     def _on_no_update(self, version):
         if not self._update_silent:
