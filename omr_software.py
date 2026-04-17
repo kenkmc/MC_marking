@@ -57,7 +57,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -65,7 +65,7 @@ GITHUB_REPO = "kenkmc/MC_marking"
 
 class UpdateChecker(QThread):
     """Background thread to check GitHub releases for updates."""
-    update_available = pyqtSignal(str, str, str)  # (latest_version, html_url, asset_url)
+    update_available = pyqtSignal(str, str, str, str)  # (latest_version, html_url, asset_url, body)
     no_update = pyqtSignal(str)                   # current_version
     check_failed = pyqtSignal(str)                # error_message
 
@@ -77,6 +77,7 @@ class UpdateChecker(QThread):
                 data = json.loads(resp.read().decode())
             tag = data.get("tag_name", "").lstrip("vV")
             html_url = data.get("html_url", "")
+            body = data.get("body", "") or ""
             # Find the .zip asset download URL for auto-update
             asset_url = ""
             for asset in data.get("assets", []):
@@ -84,7 +85,7 @@ class UpdateChecker(QThread):
                     asset_url = asset.get("browser_download_url", "")
                     break
             if self._is_newer(tag, APP_VERSION):
-                self.update_available.emit(tag, html_url, asset_url)
+                self.update_available.emit(tag, html_url, asset_url, body)
             else:
                 self.no_update.emit(APP_VERSION)
         except Exception as e:
@@ -204,6 +205,9 @@ _TRANSLATIONS = {
         "col_crop": "Crop",
         "lbl_score": "Page Score: {score}",
         "lbl_total": "Total: 0",
+        "lbl_answer_status_empty": "Empty: {questions}",
+        "lbl_answer_status_multi": "Multiple: {questions}",
+        "lbl_answer_status_ok": "All answered ✓",
         # Dialogs
         "dlg_student_title": "Student Info (Manual / Paste)",
         "dlg_student_hint": "Paste from Excel: rows = students, columns = fields (tab-separated).",
@@ -232,8 +236,9 @@ _TRANSLATIONS = {
         "progress_exporting_excel": "Exporting Excel...",
         "progress_exporting_images": "Exporting image {current}/{total}...",
         "msg_export_done": "Export complete!\nSaved to:\n{folder}",
-        "lbl_student_counts": "Pages scanned: {pages}  |  Students entered: {students}",
+        "lbl_student_counts": "Pages: {pages}  |  Entered: {students}  |  Present: {present}",
         "lbl_page_absent": "(Absent)",
+        "lbl_student_info": "\ud83d\udc64 {info}",
         # About
         "menu_help": "Help",
         "menu_about": "About CheckMate",
@@ -256,6 +261,7 @@ _TRANSLATIONS = {
         "chk_auto_update": "Check for updates on startup",
         "update_title": "Update Available",
         "update_msg": "A new version of CheckMate is available!\n\nCurrent version: v{current}\nLatest version: v{latest}",
+        "update_whats_new": "What's New",
         "update_auto_btn": "Update Now",
         "update_manual_btn": "Open Download Page",
         "update_downloading": "Downloading CheckMate v{version}...",
@@ -324,6 +330,9 @@ _TRANSLATIONS = {
         "col_crop": "裁剪",
         "lbl_score": "本頁分數：{score}",
         "lbl_total": "總計：0",
+        "lbl_answer_status_empty": "空白：{questions}",
+        "lbl_answer_status_multi": "多選：{questions}",
+        "lbl_answer_status_ok": "全部已作答 ✓",
         # Dialogs
         "dlg_student_title": "學生資料（手動 / 貼上）",
         "dlg_student_hint": "從 Excel 貼上：列 = 學生，欄 = 各欄位（Tab 分隔）。",
@@ -352,8 +361,9 @@ _TRANSLATIONS = {
         "progress_exporting_excel": "正在匯出 Excel...",
         "progress_exporting_images": "正在匯出圖片 {current}/{total}...",
         "msg_export_done": "匯出完成！\n已儲存至：\n{folder}",
-        "lbl_student_counts": "已掃描頁數：{pages}  |  已輸入學生數：{students}",
+        "lbl_student_counts": "已掃描頁數：{pages}  |  已輸入：{students}  |  出席：{present}",
         "lbl_page_absent": "（缺席）",
+        "lbl_student_info": "👤 {info}",
         # About
         "menu_help": "說明",
         "menu_about": "關於 CheckMate",
@@ -376,6 +386,7 @@ _TRANSLATIONS = {
         "chk_auto_update": "啟動時自動檢查更新",
         "update_title": "有可用更新",
         "update_msg": "CheckMate 有新版本可用！\n\n目前版本：v{current}\n最新版本：v{latest}",
+        "update_whats_new": "更新內容",
         "update_auto_btn": "立即更新",
         "update_manual_btn": "開啟下載頁面",
         "update_downloading": "正在下載 CheckMate v{version}...",
@@ -1085,6 +1096,7 @@ class OMRSoftware(QMainWindow):
         self.debug_records = []
         self.student_absence = {}  # page_idx -> bool (True if absent)
         self.extra_students = []   # Extra student records beyond PDF pages
+        self.student_order = []    # Ordered list: [{"text":{...}, "absent":bool, "page_idx": int or None}, ...]
 
         # Settings (persistent)
         self._settings = QSettings("CheckMate", "CheckMate")
@@ -2477,6 +2489,12 @@ class OMRSoftware(QMainWindow):
         nav_layout.addWidget(btn_next)
         nav_layout.addStretch()
         
+        # Student info label for current page
+        self.lbl_student_info = QLabel("")
+        self.lbl_student_info.setStyleSheet("color: #2c5f8a; font-size: 13px; font-weight: bold; padding: 0 8px;")
+        nav_layout.addWidget(self.lbl_student_info)
+        nav_layout.addStretch()
+        
         # Correction info label
         self.lbl_correction = QLabel("")
         self.lbl_correction.setMinimumWidth(200)
@@ -2516,6 +2534,10 @@ class OMRSoftware(QMainWindow):
         
         self.lbl_score = QLabel(tr("lbl_total"))
         right_layout.addWidget(self.lbl_score)
+
+        self.lbl_answer_status = QLabel("")
+        self.lbl_answer_status.setStyleSheet("color: #856404; font-size: 12px; padding: 2px;")
+        right_layout.addWidget(self.lbl_answer_status)
         
         layout.addWidget(right_widget)
 
@@ -2536,6 +2558,7 @@ class OMRSoftware(QMainWindow):
         saved_page_offsets = getattr(self, 'page_offsets', {})
         saved_student_absence = getattr(self, 'student_absence', {})
         saved_extra_students = getattr(self, 'extra_students', [])
+        saved_student_order = getattr(self, 'student_order', [])
         
         # Rebuild UI
         self.init_ui()
@@ -2550,6 +2573,7 @@ class OMRSoftware(QMainWindow):
         self.page_offsets = saved_page_offsets
         self.student_absence = saved_student_absence
         self.extra_students = saved_extra_students
+        self.student_order = saved_student_order
         
         if saved_pdf is not None:
             self.pdf_document = saved_pdf
@@ -2606,25 +2630,54 @@ class OMRSoftware(QMainWindow):
         self._update_thread.check_failed.connect(self._on_update_failed)
         self._update_thread.start()
 
-    def _on_update_available(self, latest, html_url, asset_url):
+    def _on_update_available(self, latest, html_url, asset_url, body=""):
         is_frozen = getattr(sys, 'frozen', False)
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle(tr("update_title"))
-        msg_box.setText(tr("update_msg", current=APP_VERSION, latest=latest))
-        msg_box.setIcon(QMessageBox.Information)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("update_title"))
+        dialog.setMinimumWidth(480)
+        dlg_layout = QVBoxLayout(dialog)
+
+        dlg_layout.addWidget(QLabel(tr("update_msg", current=APP_VERSION, latest=latest)))
+
+        if body.strip():
+            dlg_layout.addWidget(QLabel(f"\n<b>{tr('update_whats_new')}:</b>"))
+            from PyQt5.QtWidgets import QTextEdit
+            notes_box = QTextEdit()
+            notes_box.setReadOnly(True)
+            notes_box.setMarkdown(body)
+            notes_box.setMinimumHeight(160)
+            dlg_layout.addWidget(notes_box)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
         if is_frozen and asset_url:
-            btn_auto = msg_box.addButton(tr("update_auto_btn"), QMessageBox.AcceptRole)
-            btn_manual = msg_box.addButton(tr("update_manual_btn"), QMessageBox.ActionRole)
+            btn_auto = QPushButton(tr("update_auto_btn"))
+            btn_row.addWidget(btn_auto)
         else:
             btn_auto = None
-            btn_manual = msg_box.addButton(tr("update_manual_btn"), QMessageBox.AcceptRole)
-        msg_box.addButton(QMessageBox.Cancel)
-        msg_box.setDefaultButton(btn_auto if btn_auto else btn_manual)
-        msg_box.exec_()
-        clicked = msg_box.clickedButton()
-        if clicked == btn_auto:
+        btn_manual = QPushButton(tr("update_manual_btn"))
+        btn_row.addWidget(btn_manual)
+        btn_cancel = QPushButton(tr("btn_clear"))  # Cancel
+        btn_row.addWidget(btn_cancel)
+        dlg_layout.addLayout(btn_row)
+
+        result = {"action": None}
+        def on_auto():
+            result["action"] = "auto"
+            dialog.accept()
+        def on_manual():
+            result["action"] = "manual"
+            dialog.accept()
+        if btn_auto:
+            btn_auto.clicked.connect(on_auto)
+        btn_manual.clicked.connect(on_manual)
+        btn_cancel.clicked.connect(dialog.reject)
+
+        dialog.exec_()
+        if result["action"] == "auto":
             self._start_auto_update(asset_url, latest)
-        elif clicked == btn_manual:
+        elif result["action"] == "manual":
             QDesktopServices.openUrl(QUrl(html_url))
 
     def _start_auto_update(self, asset_url, version):
@@ -2944,6 +2997,22 @@ class OMRSoftware(QMainWindow):
             absent_item.setCheckState(Qt.Checked if self.student_absence.get(p_idx, False) else Qt.Unchecked)
             table.setItem(row, absent_col, absent_item)
 
+        # Load extra_students (absent / overflow students from previous save)
+        existing_extras = getattr(self, 'extra_students', [])
+        for extra in existing_extras:
+            new_row = table.rowCount()
+            table.insertRow(new_row)
+            page_item = QTableWidgetItem("-")
+            page_item.setFlags(Qt.ItemIsEnabled)
+            table.setItem(new_row, 0, page_item)
+            extra_texts = extra.get("text", {})
+            for col, label in enumerate(labels, start=1):
+                table.setItem(new_row, col, QTableWidgetItem(extra_texts.get(label, "")))
+            abs_item = QTableWidgetItem()
+            abs_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            abs_item.setCheckState(Qt.Checked if extra.get("absent", True) else Qt.Unchecked)
+            table.setItem(new_row, absent_col, abs_item)
+
         layout.addWidget(table)
 
         # Status label showing counts
@@ -2953,15 +3022,22 @@ class OMRSoftware(QMainWindow):
 
         def _update_counts():
             num_pages = len(page_indices)
-            # Count students: rows that have at least one non-empty text field
+            absent_c = 1 + len(labels)
             num_students = 0
+            num_present = 0
             for r in range(table.rowCount()):
+                has_data = False
                 for c in range(1, 1 + len(labels)):
                     item = table.item(r, c)
                     if item and item.text().strip():
-                        num_students += 1
+                        has_data = True
                         break
-            count_label.setText(tr("lbl_student_counts", pages=num_pages, students=num_students))
+                if has_data:
+                    num_students += 1
+                    abs_item = table.item(r, absent_c)
+                    if not abs_item or abs_item.checkState() != Qt.Checked:
+                        num_present += 1
+            count_label.setText(tr("lbl_student_counts", pages=num_pages, students=num_students, present=num_present))
 
         _update_counts()
         table.cellChanged.connect(lambda row, col: _update_counts())
@@ -3015,31 +3091,66 @@ class OMRSoftware(QMainWindow):
 
         def accept():
             self._ensure_results_for_pages()
-            # Save real pages
-            for row, p_idx in enumerate(page_indices):
-                page_texts = self.results[p_idx].setdefault("text", {})
+
+            # ── Collect ALL student data from every row (page rows + extra rows) ──
+            all_students = []
+            for row in range(table.rowCount()):
+                student = {"text": {}}
                 for col, label in enumerate(labels, start=1):
                     item = table.item(row, col)
-                    val = item.text().strip() if item else ""
-                    if val:
+                    student["text"][label] = item.text().strip() if item else ""
+                abs_item = table.item(row, absent_col)
+                student["absent"] = (abs_item.checkState() == Qt.Checked) if abs_item else False
+                all_students.append(student)
+
+            # ── Separate present vs absent, preserving order ──
+            present_students = [s for s in all_students if not s["absent"]]
+            absent_students  = [s for s in all_students if s["absent"]]
+
+            # ── Map present students → PDF pages in order ──
+            #    This fixes the bug where absent students in the middle
+            #    caused subsequent students to be mapped to the wrong pages.
+            for p_idx in page_indices:
+                self.results[p_idx].setdefault("text", {})
+                # Clear old text data for this page
+                for label in labels:
+                    self.results[p_idx]["text"][label] = ""
+                self.student_absence[p_idx] = False
+
+            for i, p_idx in enumerate(page_indices):
+                if i < len(present_students):
+                    page_texts = self.results[p_idx]["text"]
+                    for label, val in present_students[i]["text"].items():
                         page_texts[label] = val
-                    elif label in page_texts:
-                        page_texts[label] = ""
-                # Save absence status
-                abs_item = table.item(row, absent_col)
-                self.student_absence[p_idx] = (abs_item.checkState() == Qt.Checked) if abs_item else False
-            # Save extra rows (beyond actual PDF pages)
+
+            # ── Excess present students beyond page count → extra (non-absent) ──
             extra = []
-            for row in range(len(page_indices), table.rowCount()):
-                rec = {"text": {}, "absent": True}
-                for col, label in enumerate(labels, start=1):
-                    item = table.item(row, col)
-                    rec["text"][label] = item.text().strip() if item else ""
-                abs_item = table.item(row, absent_col)
-                rec["absent"] = (abs_item.checkState() == Qt.Checked) if abs_item else True
-                extra.append(rec)
+            for s in present_students[len(page_indices):]:
+                extra.append({"text": s["text"], "absent": False})
+
+            # ── Absent students → extra_students ──
+            for s in absent_students:
+                extra.append({"text": s["text"], "absent": True})
+
             self.extra_students = extra
+
+            # Build student_order preserving original input order
+            self.student_order = []
+            present_idx = 0
+            for s in all_students:
+                entry = {"text": dict(s["text"]), "absent": s["absent"]}
+                if not s["absent"]:
+                    if present_idx < len(page_indices):
+                        entry["page_idx"] = page_indices[present_idx]
+                    else:
+                        entry["page_idx"] = None
+                    present_idx += 1
+                else:
+                    entry["page_idx"] = None
+                self.student_order.append(entry)
+
             dialog.accept()
+            self._update_student_info_label()
             self.update_result_table()
 
         # Use event filter for reliable Ctrl+V interception
@@ -3216,6 +3327,28 @@ class OMRSoftware(QMainWindow):
 
         # Update table for this page result if available
         self.update_result_table()
+
+        # Update student info label for current page
+        self._update_student_info_label()
+
+    def _update_student_info_label(self):
+        """Update the student info label for the current page from student_order."""
+        if not hasattr(self, 'lbl_student_info'):
+            return
+        student_order = getattr(self, 'student_order', [])
+        if not student_order:
+            self.lbl_student_info.setText("")
+            return
+        # Find the student mapped to the current page
+        for entry in student_order:
+            if entry.get("page_idx") == self.current_page:
+                parts = [v for v in entry["text"].values() if v]
+                if parts:
+                    self.lbl_student_info.setText(tr("lbl_student_info", info="  -  ".join(parts)))
+                else:
+                    self.lbl_student_info.setText("")
+                return
+        self.lbl_student_info.setText("")
 
     def prev_page(self):
         if self.current_page > 0:
@@ -3725,6 +3858,31 @@ class OMRSoftware(QMainWindow):
             current_row += 1
         
         self.lbl_score.setText(tr("lbl_score", score=total_score))
+
+        # Update per-page answer status: show question numbers that are empty or multiple
+        if hasattr(self, 'lbl_answer_status'):
+            empty_qs = []
+            multi_qs = []
+            for q_num in sorted_qs:
+                val = str(opts.get(q_num, "")).strip()
+                if val == "":
+                    empty_qs.append(f"Q{q_num}")
+                elif len(val) > 1:
+                    multi_qs.append(f"Q{q_num}")
+            parts = []
+            if empty_qs:
+                parts.append(tr("lbl_answer_status_empty", questions=", ".join(empty_qs)))
+            if multi_qs:
+                parts.append(tr("lbl_answer_status_multi", questions=", ".join(multi_qs)))
+            if parts:
+                self.lbl_answer_status.setText("  |  ".join(parts))
+                self.lbl_answer_status.setStyleSheet("color: #e65100; font-size: 12px; font-weight: bold; padding: 2px;")
+            elif sorted_qs:
+                self.lbl_answer_status.setText(tr("lbl_answer_status_ok"))
+                self.lbl_answer_status.setStyleSheet("color: #2e7d32; font-size: 12px; padding: 2px;")
+            else:
+                self.lbl_answer_status.setText("")
+
         self.table.blockSignals(False)
 
     def on_table_edit(self, row, col):
@@ -4519,69 +4677,133 @@ class OMRSoftware(QMainWindow):
         page_blank_counts = []
         page_multi_counts = []
         
-        for p_idx, res in self.results.items():
-            if self.first_page_key and p_idx == 0:
-                continue
-            
-            row = [p_idx + 1]
-            texts = res.get("text", {})
-            for t_key in sorted_texts:
-                row.append(texts.get(t_key, ""))
+        student_order = getattr(self, 'student_order', [])
 
-            is_absent = self.student_absence.get(p_idx, False) if hasattr(self, 'student_absence') else False
-            row.append("✓" if is_absent else "")
-                
-            opts = res.get("options", {})
-            page_blank = 0
-            page_multi = 0
-            page_score = 0
-            page_total = 0
-            for q_idx, q in enumerate(sorted_qs):
-                val = opts.get(q, "") if not is_absent else ""
-                row.append(val)
+        if student_order:
+            # ── Use student_order to preserve user's original input order ──
+            for entry in student_order:
+                p_idx = entry.get("page_idx")
+                is_absent = entry.get("absent", False)
+
+                # Skip answer-key page if applicable
+                if p_idx is not None and self.first_page_key and p_idx == 0:
+                    continue
+
+                row = [p_idx + 1 if p_idx is not None else "-"]
+
+                entry_texts = entry.get("text", {})
+                for t_key in sorted_texts:
+                    row.append(entry_texts.get(t_key, ""))
+
+                row.append("✓" if is_absent else "")
+
+                # Options from results (only if present and has a mapped page)
+                if p_idx is not None and not is_absent:
+                    res = self.results.get(p_idx, {})
+                    opts = res.get("options", {})
+                else:
+                    opts = {}
+
+                page_blank = 0
+                page_multi = 0
+                page_score = 0
+                page_total = 0
+                for q_idx, q in enumerate(sorted_qs):
+                    val = opts.get(q, "") if not is_absent else ""
+                    row.append(val)
+                    if not is_absent and p_idx is not None:
+                        col_letter = get_column_letter(q_start_col + q_idx)
+                        if val == "" or val is None:
+                            empty_cells.append(f"{col_letter}{data_row_num}")
+                            page_blank += 1
+                        elif len(str(val)) > 1:
+                            multiple_cells.append(f"{col_letter}{data_row_num}")
+                            page_multi += 1
+                        correct_val = self.answer_key.get(q, "")
+                        if correct_val != "":
+                            page_total += 1
+                            if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
+                                page_score += 1
+
+                if sorted_qs and not is_absent and p_idx is not None:
+                    first_q_col = get_column_letter(q_start_col)
+                    last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
+                    score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
+                    row.append(score_formula)
+                else:
+                    row.append("")
+
+                ws.append(row)
+                if not is_absent and p_idx is not None:
+                    page_scores.append(page_score)
+                    page_totals.append(page_total)
+                    page_blank_counts.append(page_blank)
+                    page_multi_counts.append(page_multi)
+                data_row_num += 1
+        else:
+            # ── Fallback: iterate results by page index, then extra_students ──
+            for p_idx, res in self.results.items():
+                if self.first_page_key and p_idx == 0:
+                    continue
+
+                row = [p_idx + 1]
+                texts = res.get("text", {})
+                for t_key in sorted_texts:
+                    row.append(texts.get(t_key, ""))
+
+                is_absent = self.student_absence.get(p_idx, False) if hasattr(self, 'student_absence') else False
+                row.append("✓" if is_absent else "")
+
+                opts = res.get("options", {})
+                page_blank = 0
+                page_multi = 0
+                page_score = 0
+                page_total = 0
+                for q_idx, q in enumerate(sorted_qs):
+                    val = opts.get(q, "") if not is_absent else ""
+                    row.append(val)
+                    if not is_absent:
+                        col_letter = get_column_letter(q_start_col + q_idx)
+                        if val == "" or val is None:
+                            empty_cells.append(f"{col_letter}{data_row_num}")
+                            page_blank += 1
+                        elif len(str(val)) > 1:
+                            multiple_cells.append(f"{col_letter}{data_row_num}")
+                            page_multi += 1
+                        correct_val = self.answer_key.get(q, "")
+                        if correct_val != "":
+                            page_total += 1
+                            if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
+                                page_score += 1
+
+                if sorted_qs and not is_absent:
+                    first_q_col = get_column_letter(q_start_col)
+                    last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
+                    score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
+                    row.append(score_formula)
+                else:
+                    row.append("")
+
+                ws.append(row)
                 if not is_absent:
-                    col_letter = get_column_letter(q_start_col + q_idx)
-                    if val == "" or val is None:
-                        empty_cells.append(f"{col_letter}{data_row_num}")
-                        page_blank += 1
-                    elif len(str(val)) > 1:
-                        multiple_cells.append(f"{col_letter}{data_row_num}")
-                        page_multi += 1
-                    correct_val = self.answer_key.get(q, "")
-                    if correct_val != "":
-                        page_total += 1
-                        if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
-                            page_score += 1
-            
-            if sorted_qs and not is_absent:
-                first_q_col = get_column_letter(q_start_col)
-                last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
-                score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
-                row.append(score_formula)
-            else:
-                row.append("")
-            
-            ws.append(row)
-            # Only include non-absent students in statistics
-            if not is_absent:
-                page_scores.append(page_score)
-                page_totals.append(page_total)
-                page_blank_counts.append(page_blank)
-                page_multi_counts.append(page_multi)
-            data_row_num += 1
+                    page_scores.append(page_score)
+                    page_totals.append(page_total)
+                    page_blank_counts.append(page_blank)
+                    page_multi_counts.append(page_multi)
+                data_row_num += 1
 
-        # Append extra students (absent students added beyond PDF pages)
-        for extra in extra_students:
-            row = ["-"]
-            extra_texts = extra.get("text", {})
-            for t_key in sorted_texts:
-                row.append(extra_texts.get(t_key, ""))
-            row.append("✓" if extra.get("absent", True) else "")
-            for q in sorted_qs:
+            # Append extra students (absent students added beyond PDF pages)
+            for extra in extra_students:
+                row = ["-"]
+                extra_texts = extra.get("text", {})
+                for t_key in sorted_texts:
+                    row.append(extra_texts.get(t_key, ""))
+                row.append("✓" if extra.get("absent", True) else "")
+                for q in sorted_qs:
+                    row.append("")
                 row.append("")
-            row.append("")
-            ws.append(row)
-            data_row_num += 1
+                ws.append(row)
+                data_row_num += 1
         
         last_data_row = data_row_num - 1
         
