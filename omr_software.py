@@ -57,7 +57,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -2750,6 +2750,20 @@ class OMRSoftware(QMainWindow):
             shutil.rmtree(extract_dir, ignore_errors=True)
             raise
 
+        # Detect nested folder: if the zip contains a single top-level folder,
+        # use that folder as the source instead of extract_dir.
+        # This handles zips like: CheckMate.zip -> CheckMate/ -> CheckMate.exe, _internal/
+        source_dir = extract_dir
+        entries = os.listdir(extract_dir)
+        if len(entries) == 1:
+            single_entry = os.path.join(extract_dir, entries[0])
+            if os.path.isdir(single_entry):
+                # Check if this subfolder contains an exe or _internal
+                sub_contents = os.listdir(single_entry)
+                if any(f.endswith('.exe') for f in sub_contents) or '_internal' in sub_contents:
+                    source_dir = single_entry
+                    print(f"  Update: Using nested folder '{entries[0]}' as source")
+
         # Build the updater batch script
         pid = os.getpid()
         exe_name = os.path.basename(sys.executable)
@@ -2769,7 +2783,7 @@ class OMRSoftware(QMainWindow):
             'echo Applying update...',
             f'rd /s /q "{app_dir}\\_internal" 2>NUL',
             f'del /f /q "{app_dir}\\{exe_name}" 2>NUL',
-            f'xcopy /s /e /y /q "{extract_dir}\\*" "{app_dir}\\"',
+            f'xcopy /s /e /y /q "{source_dir}\\*" "{app_dir}\\"',
             'echo Starting updated CheckMate...',
             f'start "" "{app_dir}\\{exe_name}"',
             f'rd /s /q "{extract_dir}" 2>NUL',
