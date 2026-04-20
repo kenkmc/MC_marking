@@ -7,6 +7,10 @@ __pycache__/
 # Build artifacts
 build/
 dist/
+_internal/
+CheckMate.exe
+build_log*.txt
+build_stderr*.txt
 
 # Debug outputs
 debug_crops/

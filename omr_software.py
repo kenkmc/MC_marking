@@ -57,7 +57,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -2768,10 +2768,13 @@ class OMRSoftware(QMainWindow):
         pid = os.getpid()
         exe_name = os.path.basename(sys.executable)
         updater_path = os.path.join(tempfile.gettempdir(), "checkmate_updater.bat")
-        # Use raw strings in the batch script; Python f-string fills values
+        log_path = os.path.join(tempfile.gettempdir(), "checkmate_update.log")
+        # Use robocopy instead of xcopy for reliable copying with retries.
+        # robocopy exit codes: 0-7 = success, 8+ = failure.
         script_lines = [
             '@echo off',
             'chcp 65001 >nul 2>&1',
+            f'echo [%date% %time%] Update started > "{log_path}"',
             'echo Waiting for CheckMate to exit...',
             ':wait',
             f'tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL',
@@ -2779,15 +2782,50 @@ class OMRSoftware(QMainWindow):
             '    timeout /t 1 /nobreak >NUL',
             '    goto wait',
             ')',
-            'timeout /t 2 /nobreak >NUL',
+            # Extra delay to let AV / OS release file locks
+            'timeout /t 5 /nobreak >NUL',
+            f'echo [%date% %time%] Process exited, applying update... >> "{log_path}"',
             'echo Applying update...',
-            f'rd /s /q "{app_dir}\\_internal" 2>NUL',
+            # Step 1: Mirror _internal directory (copies new files, deletes stale files)
+            # /MIR = mirror, /R:10 /W:3 = retry 10 times with 3s wait
+            f'echo [%date% %time%] robocopy _internal... >> "{log_path}"',
+            f'robocopy "{source_dir}\\_internal" "{app_dir}\\_internal" /MIR /R:10 /W:3 /NFL /NDL /NP >> "{log_path}" 2>&1',
+            'if errorlevel 8 (',
+            f'    echo [%date% %time%] ERROR: robocopy _internal failed with code %errorlevel% >> "{log_path}"',
+            '    echo ERROR: Failed to copy _internal. See log for details.',
+            '    pause',
+            '    exit /b 1',
+            ')',
+            # Step 2: Copy root-level files (exe, etc.) — /LEV:1 = no subdirs
+            f'echo [%date% %time%] robocopy root files... >> "{log_path}"',
             f'del /f /q "{app_dir}\\{exe_name}" 2>NUL',
-            f'xcopy /s /e /y /q "{source_dir}\\*" "{app_dir}\\"',
+            f'robocopy "{source_dir}" "{app_dir}" "{exe_name}" /R:10 /W:3 /IS /IT /NFL /NDL /NP >> "{log_path}" 2>&1',
+            'if errorlevel 8 (',
+            f'    echo [%date% %time%] ERROR: robocopy exe failed with code %errorlevel% >> "{log_path}"',
+            '    echo ERROR: Failed to copy exe. See log for details.',
+            '    pause',
+            '    exit /b 1',
+            ')',
+            # Step 3: Verify critical files exist
+            f'if not exist "{app_dir}\\{exe_name}" (',
+            f'    echo [%date% %time%] ERROR: {exe_name} missing after copy >> "{log_path}"',
+            '    echo ERROR: Update failed - exe missing after copy.',
+            '    pause',
+            '    exit /b 1',
+            ')',
+            f'if not exist "{app_dir}\\_internal\\base_library.zip" (',
+            f'    echo [%date% %time%] ERROR: base_library.zip missing >> "{log_path}"',
+            '    echo ERROR: Update failed - base_library.zip missing.',
+            '    pause',
+            '    exit /b 1',
+            ')',
+            f'echo [%date% %time%] Update verified OK >> "{log_path}"',
             'echo Starting updated CheckMate...',
             f'start "" "{app_dir}\\{exe_name}"',
+            'timeout /t 3 /nobreak >NUL',
             f'rd /s /q "{extract_dir}" 2>NUL',
             f'del /f /q "{zip_path}" 2>NUL',
+            f'echo [%date% %time%] Cleanup done >> "{log_path}"',
         ]
         with open(updater_path, 'w', encoding='utf-8') as f:
             f.write('\r\n'.join(script_lines) + '\r\n')
