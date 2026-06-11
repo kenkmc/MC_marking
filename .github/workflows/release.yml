@@ -1,0 +1,67 @@
+name: Build And Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and publish
+        required: true
+        default: v1.6.4
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build Executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm .\mc_marking.spec
+
+      - name: Package Release Zip
+        id: package
+        shell: pwsh
+        run: |
+          $tag = '${{ github.event.inputs.tag }}'
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = '${{ github.ref_name }}'
+          }
+          $zipName = "CheckMate_${tag}.zip"
+          if (Test-Path $zipName) {
+            Remove-Item $zipName -Force
+          }
+          Compress-Archive -Path .\dist\CheckMate\* -DestinationPath $zipName -CompressionLevel Optimal
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          name: CheckMate ${{ steps.package.outputs.tag }}
+          draft: false
+          files: ${{ steps.package.outputs.zip_name }}
+          fail_on_unmatched_files: true
+          append_body: true
