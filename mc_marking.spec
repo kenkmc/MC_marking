@@ -1,22 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
-from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 
 icon_path = os.path.abspath("app.ico")
 icon = icon_path if os.path.exists(icon_path) else None
-
-packages = [
-    "easyocr",
-    "torch",
-    "torchvision",
-    "cv2",
-    "fitz",
-    "PyQt5",
-    "pytesseract",
-]
 
 hiddenimports = []
 datas = []
@@ -34,16 +23,6 @@ def collect_tree(src_dir, dest_root):
         for file_name in files:
             collected.append((os.path.join(root, file_name), dest_dir))
     return collected
-
-for pkg in packages:
-    try:
-        pkg_datas, pkg_bins, pkg_hidden = collect_all(pkg)
-        datas += pkg_datas
-        binaries += pkg_bins
-        hiddenimports += pkg_hidden
-    except Exception:
-        # If a package is missing, skip it. The app will still run if unused.
-        pass
 
 # Include sample template (optional)
 datas += [("template.json", ".")]
