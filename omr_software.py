@@ -57,7 +57,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -1092,6 +1092,7 @@ class OMRSoftware(QMainWindow):
         self.first_page_key = False
         self.align_reference_gray = None
         self.align_reference_size = None
+        self.align_reference_offset = None
         self.topic_map = {}
         self.debug_records = []
         self.student_absence = {}  # page_idx -> bool (True if absent)
@@ -1238,6 +1239,7 @@ class OMRSoftware(QMainWindow):
         self.align_ref_full_gray = None
         self.align_reference_gray = None
         self.align_reference_bounds = None
+        self.align_reference_offset = None
 
     def _align_init_template(self, img_np, page_idx):
         """Extract and store alignment templates from the first (reference) page.
@@ -1250,10 +1252,12 @@ class OMRSoftware(QMainWindow):
             gray = img_np.copy()
         
         self.align_templates = []
+        reference_offset = self._get_page_offset(0)
+        self.align_reference_offset = (float(reference_offset[0]), float(reference_offset[1]))
         
         for mark_idx, align_mark in enumerate(self.view.align_marks):
             rect = align_mark.sceneBoundingRect()
-            off_x, off_y = self._get_page_offset(0)
+            off_x, off_y = reference_offset
             
             ref_x = int(rect.x() - off_x)
             ref_y = int(rect.y() - off_y)
@@ -2289,13 +2293,23 @@ class OMRSoftware(QMainWindow):
         print(f"  Detected filled option(s): {result if result else '(none)'}")
 
         try:
+            context = context or {}
+            correct_answer = context.get("correct_answer", "")
+            question_num = context.get("question")
+            if not correct_answer and question_num is not None and hasattr(self, "answer_key"):
+                correct_answer = self.answer_key.get(question_num, "") or self.answer_key.get(str(question_num), "")
+
+            normalized_result = "".join(str(result).split()).upper()
+            normalized_correct = "".join(str(correct_answer).split()).upper()
             record = {
-                "context": context or {},
+                "context": context,
                 "options_count": options_count,
                 "content_bounds": [content_left, content_right],
                 "cell_edges": cell_edges,
                 "scores": cell_scores,
                 "result": result,
+                "correct_answer": correct_answer,
+                "is_correct": bool(normalized_correct and normalized_result == normalized_correct),
                 "thresholds": decision_info.get("thresholds", {}),
                 "decision": decision_info,
             }
@@ -3490,12 +3504,58 @@ class OMRSoftware(QMainWindow):
             return self.page_offsets[0]
         return (0, 0)
 
+    def _render_page_image_np(self, page_idx):
+        """Render a PDF page into a NumPy RGB image using the current preview settings."""
+        if not self.pdf_document or page_idx < 0 or page_idx >= len(self.pdf_document):
+            return None
+
+        page = self.pdf_document[page_idx]
+        mat = fitz.Matrix(2, 2)
+        pix = page.get_pixmap(matrix=mat)
+        img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        img_np = np.array(img_pil)
+
+        if hasattr(self, 'check_auto_deskew') and self.check_auto_deskew.isChecked():
+            img_np, _ = deskew_image(img_np)
+
+        return img_np
+
+    def _refresh_alignment_reference_from_page0(self):
+        """Rebuild the page 0 alignment reference after a manual image offset change."""
+        if not self.pdf_document or self.current_page != 0:
+            return
+        if not hasattr(self, 'check_auto_align') or not self.check_auto_align.isChecked():
+            return
+        if not hasattr(self, 'view') or not self.view.align_marks:
+            return
+
+        current_offset = self.page_offsets.get(0)
+        if current_offset is None and self.current_pixmap_item:
+            current_offset = self.current_pixmap_item.get_offset()
+        if current_offset is None:
+            current_offset = (0, 0)
+
+        current_offset = (float(current_offset[0]), float(current_offset[1]))
+        has_templates = bool(getattr(self, 'align_templates', []))
+        if has_templates and self.align_reference_offset == current_offset:
+            return
+
+        ref_img = self._render_page_image_np(0)
+        if ref_img is None:
+            return
+
+        self.page_offsets[0] = current_offset
+        self._reset_align_templates()
+        self._align_init_template(ref_img, 0)
+
     def load_page(self, p_idx, apply_corrections=True):
         if not self.pdf_document: return
         
         # Save current image offset
         if self.current_pixmap_item:
             self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
+        if self.current_page == 0 and p_idx != 0:
+            self._refresh_alignment_reference_from_page0()
             
         self.current_page = p_idx
         self.lbl_page.setText(tr("lbl_page", current=p_idx+1, total=len(self.pdf_document)))
@@ -3791,6 +3851,9 @@ class OMRSoftware(QMainWindow):
                         
                         if mark.mark_type == MARK_TYPE_OPTION:
                             # Use bubble detection for options
+                            correct_answer = ""
+                            if hasattr(self, "answer_key"):
+                                correct_answer = self.answer_key.get(mark.question_num, "") or self.answer_key.get(str(mark.question_num), "")
                             text = self.detect_filled_option(
                                 crop,
                                 mark.options_count,
@@ -3798,7 +3861,8 @@ class OMRSoftware(QMainWindow):
                                 context={
                                     "page": p_idx + 1,
                                     "question": mark.question_num,
-                                    "label": f"Q{mark.question_num}"
+                                    "label": f"Q{mark.question_num}",
+                                    "correct_answer": correct_answer,
                                 }
                             )
                         else:
@@ -4477,10 +4541,34 @@ class OMRSoftware(QMainWindow):
         try:
             os.makedirs(out_folder, exist_ok=True)
 
+            def _normalize_answer(value):
+                return "".join(str(value).split()).upper()
+
+            enriched_records = []
+            if has_records:
+                for record in self.debug_records:
+                    enriched = dict(record)
+                    context = enriched.get("context", {}) or {}
+                    question_num = context.get("question")
+                    correct_answer = enriched.get("correct_answer", "")
+                    if not correct_answer and question_num is not None and hasattr(self, "answer_key"):
+                        correct_answer = self.answer_key.get(question_num, "") or self.answer_key.get(str(question_num), "")
+                    enriched["correct_answer"] = correct_answer
+                    enriched["is_correct"] = bool(
+                        _normalize_answer(correct_answer)
+                        and _normalize_answer(enriched.get("result", "")) == _normalize_answer(correct_answer)
+                    )
+                    enriched_records.append(enriched)
+
             if has_records:
                 records_path = os.path.join(out_folder, "debug_records.json")
                 with open(records_path, "w", encoding="utf-8") as f:
-                    json.dump(self.debug_records, f, ensure_ascii=False, indent=2)
+                    json.dump(enriched_records, f, ensure_ascii=False, indent=2)
+
+            if hasattr(self, "answer_key") and self.answer_key:
+                answer_key_path = os.path.join(out_folder, "answer_key.json")
+                with open(answer_key_path, "w", encoding="utf-8") as f:
+                    json.dump(self.answer_key, f, ensure_ascii=False, indent=2)
 
             if hasattr(self, "pdf_path") and self.pdf_path and os.path.isfile(self.pdf_path):
                 try:
@@ -4849,19 +4937,22 @@ class OMRSoftware(QMainWindow):
                     crop = img_np[y1:y2, x1:x2]
                     crop_pil = Image.fromarray(crop)
                     opt = mark.options_count
+                    correct_answer = ""
+                    if hasattr(self, "answer_key"):
+                        correct_answer = self.answer_key.get(mark.question_num, "") or self.answer_key.get(str(mark.question_num), "")
                     result_opt = self.detect_filled_option(
                         crop_pil,
                         opt,
                         context={
                             "page": p_idx + 1,
                             "question": mark.question_num,
-                            "label": f"Q{mark.question_num}"
+                            "label": f"Q{mark.question_num}",
+                            "correct_answer": correct_answer,
                         }
                     )
                     page_result["options"][mark.question_num] = result_opt
-
             self.results[p_idx] = page_result
-    
+
     def _export_excel_internal(self, output_path):
         """Internal method to export Excel without file dialog."""
         if not hasattr(self, 'results'):
@@ -4878,7 +4969,6 @@ class OMRSoftware(QMainWindow):
         green_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")
         header_font = Font(bold=True)
         center_align = Alignment(horizontal='center')
-        
         wb = Workbook()
         ws = wb.active
         ws.title = "OMR Results"
