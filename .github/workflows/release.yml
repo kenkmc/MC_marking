@@ -32,8 +32,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pyinstaller
+          python -m pip install pyinstaller PyQt5 PyMuPDF openpyxl opencv-python pillow numpy easyocr pytesseract psutil
 
       - name: Build Executable
         shell: pwsh
