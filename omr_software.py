@@ -57,7 +57,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -1253,7 +1253,7 @@ class OMRSoftware(QMainWindow):
         
         for mark_idx, align_mark in enumerate(self.view.align_marks):
             rect = align_mark.sceneBoundingRect()
-            off_x, off_y = self.page_offsets.get(0, (0, 0))
+            off_x, off_y = self._get_page_offset(0)
             
             ref_x = int(rect.x() - off_x)
             ref_y = int(rect.y() - off_y)
@@ -1876,6 +1876,155 @@ class OMRSoftware(QMainWindow):
         
         return (x1, y1, x2, y2)
 
+    @staticmethod
+    def _select_filled_options_from_scores(cell_scores):
+        """Pick filled options by comparing each cell against the blank-cell baseline."""
+        if not cell_scores:
+            return [], {}
+
+        combined_vals = [s['combined'] for s in cell_scores]
+        max_combined = max(combined_vals)
+        min_combined = min(combined_vals)
+        score_range = max_combined - min_combined
+        mean_combined = sum(combined_vals) / max(1, len(combined_vals))
+        std_combined = (sum((v - mean_combined) ** 2 for v in combined_vals) / max(1, len(combined_vals))) ** 0.5
+        max_darkness = max(s['darkness'] for s in cell_scores)
+
+        sorted_scores = sorted(cell_scores, key=lambda score: score['combined'])
+        baseline_count = max(1, len(sorted_scores) // 2)
+        blank_reference = sorted_scores[:baseline_count]
+        blank_combined_baseline = sum(s['combined'] for s in blank_reference) / baseline_count
+        blank_darkness_baseline = sum(s['darkness'] for s in blank_reference) / baseline_count
+        blank_mark_baseline = sum(s.get('mark_ratio', 0.0) for s in blank_reference) / baseline_count
+        blank_center_darkness_baseline = sum(s.get('center_darkness', s['darkness']) for s in blank_reference) / baseline_count
+        blank_center_mark_baseline = sum(s.get('center_mark_ratio', s.get('mark_ratio', 0.0)) for s in blank_reference) / baseline_count
+        max_mark_ratio = max(s.get('mark_ratio', 0.0) for s in cell_scores)
+        max_center_darkness = max(s.get('center_darkness', s['darkness']) for s in cell_scores)
+        max_center_mark_ratio = max(s.get('center_mark_ratio', s.get('mark_ratio', 0.0)) for s in cell_scores)
+
+        for score in cell_scores:
+            score['combined_margin'] = score['combined'] - blank_combined_baseline
+            score['darkness_margin'] = score['darkness'] - blank_darkness_baseline
+            score['mark_ratio_margin'] = score.get('mark_ratio', 0.0) - blank_mark_baseline
+            score['center_darkness_margin'] = score.get('center_darkness', score['darkness']) - blank_center_darkness_baseline
+            score['center_mark_ratio_margin'] = score.get('center_mark_ratio', score.get('mark_ratio', 0.0)) - blank_center_mark_baseline
+
+        max_combined_margin = max(s['combined_margin'] for s in cell_scores)
+
+        # Absolute minima keep light but real marks eligible.
+        MIN_COMBINED_THRESHOLD = 5.0
+        MIN_DARKNESS_THRESHOLD = 2.0
+
+        # Relative margins compare each option against the lower-scoring blank-like cells.
+        MIN_COMBINED_MARGIN = max(3.5, score_range * 0.35)
+        MIN_DARKNESS_MARGIN = max(1.0, (max_darkness - blank_darkness_baseline) * 0.30)
+        MIN_MARK_RATIO = 0.04
+        MIN_MARK_MARGIN = max(0.02, (max_mark_ratio - blank_mark_baseline) * 0.40)
+        MIN_CENTER_DARKNESS = 3.0
+        MIN_CENTER_DARKNESS_MARGIN = max(1.5, (max_center_darkness - blank_center_darkness_baseline) * 0.20)
+        MIN_CENTER_MARK_RATIO = 0.08
+        MIN_CENTER_MARK_MARGIN = max(0.01, (max_center_mark_ratio - blank_center_mark_baseline) * 0.12)
+
+        # Clearly blank if every cell is both low and tightly clustered.
+        BLANK_MAX_RANGE = 6.0
+        BLANK_MAX_COMBINED = 5.0
+        BLANK_MAX_MARGIN = 2.5
+
+        decision_info = {
+            'score_range': score_range,
+            'mean_combined': mean_combined,
+            'std_combined': std_combined,
+            'max_darkness': max_darkness,
+            'blank_combined_baseline': blank_combined_baseline,
+            'blank_darkness_baseline': blank_darkness_baseline,
+            'blank_mark_baseline': blank_mark_baseline,
+            'blank_center_darkness_baseline': blank_center_darkness_baseline,
+            'blank_center_mark_baseline': blank_center_mark_baseline,
+            'thresholds': {
+                'min_combined': MIN_COMBINED_THRESHOLD,
+                'min_darkness': MIN_DARKNESS_THRESHOLD,
+                'min_combined_margin': MIN_COMBINED_MARGIN,
+                'min_darkness_margin': MIN_DARKNESS_MARGIN,
+                'min_mark_ratio': MIN_MARK_RATIO,
+                'min_mark_margin': MIN_MARK_MARGIN,
+                'min_center_darkness': MIN_CENTER_DARKNESS,
+                'min_center_darkness_margin': MIN_CENTER_DARKNESS_MARGIN,
+                'min_center_mark_ratio': MIN_CENTER_MARK_RATIO,
+                'min_center_mark_margin': MIN_CENTER_MARK_MARGIN,
+                'blank_max_range': BLANK_MAX_RANGE,
+                'blank_max_combined': BLANK_MAX_COMBINED,
+                'blank_max_margin': BLANK_MAX_MARGIN,
+            }
+        }
+
+        is_clearly_blank = (
+            score_range < BLANK_MAX_RANGE and
+            max_combined < BLANK_MAX_COMBINED and
+            max_combined_margin < BLANK_MAX_MARGIN
+        )
+
+        if is_clearly_blank:
+            decision_info['reason'] = 'blank'
+            return [], decision_info
+
+        filled_options = []
+        for score in cell_scores:
+            passes_absolute = (
+                score['combined'] >= MIN_COMBINED_THRESHOLD and
+                score['darkness'] >= MIN_DARKNESS_THRESHOLD
+            )
+            passes_relative = (
+                score['combined_margin'] >= MIN_COMBINED_MARGIN and
+                (
+                    score['darkness_margin'] >= MIN_DARKNESS_MARGIN or
+                    score['center_darkness_margin'] >= MIN_CENTER_DARKNESS_MARGIN
+                )
+            )
+            passes_mark = (
+                score.get('mark_ratio', 0.0) >= MIN_MARK_RATIO and
+                score['mark_ratio_margin'] >= MIN_MARK_MARGIN
+            )
+            passes_center_support = (
+                (
+                    score.get('center_darkness', score['darkness']) >= MIN_CENTER_DARKNESS and
+                    score['center_darkness_margin'] >= MIN_CENTER_DARKNESS_MARGIN
+                ) or
+                (
+                    score.get('center_mark_ratio', score.get('mark_ratio', 0.0)) >= MIN_CENTER_MARK_RATIO and
+                    score['center_mark_ratio_margin'] >= MIN_CENTER_MARK_MARGIN
+                )
+            )
+
+            if passes_absolute and passes_relative and (passes_mark or passes_center_support):
+                filled_options.append(score['option'])
+
+        decision_info['reason'] = 'baseline' if filled_options else 'below_thresholds'
+        return filled_options, decision_info
+
+    @staticmethod
+    def _estimate_option_content_bounds(gray, saturation, has_color, dark_pixel_threshold, color_pixel_threshold, options_count):
+        """Estimate the horizontal span that actually contains the option boxes/marks."""
+        height, width = gray.shape[:2]
+
+        activity_mask = gray < dark_pixel_threshold
+        if has_color:
+            activity_mask = np.logical_or(activity_mask, saturation > color_pixel_threshold)
+
+        col_activity = np.mean(activity_mask, axis=0)
+        min_col_activity = max(0.08, 2.0 / max(1, height))
+        active_cols = np.where(col_activity >= min_col_activity)[0]
+        if active_cols.size == 0:
+            return 0, width
+
+        left = max(0, int(active_cols[0]) - 1)
+        right = min(width, int(active_cols[-1]) + 2)
+
+        min_span = max(options_count * 5, int(width * 0.55))
+        if right - left < min_span:
+            return 0, width
+
+        return left, right
+
     def detect_filled_option(self, image, options_count=4, save_debug=False, context=None):
         """
         Detect which option is filled in a multiple choice bubble area.
@@ -1900,11 +2049,6 @@ class OMRSoftware(QMainWindow):
         img_np = np.array(image)
         
         height, width = img_np.shape[:2]
-        cell_width = width // options_count
-        
-        if cell_width < 5:
-            print(f"  Warning: Cell width too small ({cell_width}px)")
-            return ""
         
         # Option labels
         option_labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[:options_count]
@@ -1937,6 +2081,7 @@ class OMRSoftware(QMainWindow):
         # Overall statistics
         overall_gray_mean = np.mean(gray)
         overall_sat_mean = np.mean(saturation) if has_color else 0
+        overall_sat_std = np.std(saturation) if has_color else 0
         
         # Apply contrast enhancement for light mark detection
         # This helps detect very faint pencil marks
@@ -1945,24 +2090,66 @@ class OMRSoftware(QMainWindow):
         if gray_max > gray_min:
             # Stretch contrast to full range
             gray_enhanced = ((gray - gray_min) / (gray_max - gray_min) * 255).astype(np.float64)
+
+        dark_pixel_threshold = max(
+            0.0,
+            overall_gray_mean - max(8.0, min(24.0, (gray_max - gray_min) * 0.12))
+        )
+        color_pixel_threshold = overall_sat_mean + max(10.0, overall_sat_std * 0.6)
+
+        content_left, content_right = self._estimate_option_content_bounds(
+            gray,
+            saturation,
+            has_color,
+            dark_pixel_threshold,
+            color_pixel_threshold,
+            options_count,
+        )
+        content_span = max(1, content_right - content_left)
+        avg_cell_width = content_span / max(1, options_count)
+        cell_edges = [
+            int(round(content_left + (content_span * i) / max(1, options_count)))
+            for i in range(options_count + 1)
+        ]
+        cell_edges[0] = content_left
+        cell_edges[-1] = content_right
+
+        if avg_cell_width < 5:
+            print(f"  Warning: Cell width too small ({avg_cell_width:.1f}px)")
+            return ""
         
-        print(f"  Image size: {width}x{height}, {options_count} options, cell width: {cell_width}px")
+        print(
+            f"  Image size: {width}x{height}, {options_count} options, "
+            f"content=({content_left},{content_right}), avg cell width: {avg_cell_width:.1f}px"
+        )
         print(f"  Overall: gray_mean={overall_gray_mean:.1f}, saturation_mean={overall_sat_mean:.1f}, contrast_range={gray_max-gray_min:.1f}")
         
         # Analyze each cell
         cell_scores = []
         
         for i in range(options_count):
-            left = i * cell_width
-            right = (i + 1) * cell_width if i < options_count - 1 else width
+            left = cell_edges[i]
+            right = cell_edges[i + 1]
             
             cell_gray = gray[:, left:right]
             cell_gray_enhanced = gray_enhanced[:, left:right]
             cell_gray_mean = np.mean(cell_gray)
             cell_gray_std = np.std(cell_gray)
+
+            center_margin_x = max(3, cell_gray.shape[1] // 4)
+            center_margin_y = max(3, cell_gray.shape[0] // 4)
+            center_left = min(center_margin_x, max(0, cell_gray.shape[1] // 2 - 1))
+            center_right = max(center_left + 1, cell_gray.shape[1] - center_margin_x)
+            center_top = min(center_margin_y, max(0, cell_gray.shape[0] // 2 - 1))
+            center_bottom = max(center_top + 1, cell_gray.shape[0] - center_margin_y)
+            center_gray = cell_gray[center_top:center_bottom, center_left:center_right]
+            if center_gray.size == 0:
+                center_gray = cell_gray
+            center_gray_mean = np.mean(center_gray)
             
             # Darkness score (lower mean = darker)
             darkness_score = overall_gray_mean - cell_gray_mean
+            center_darkness_score = overall_gray_mean - center_gray_mean
             
             # Enhanced darkness score using contrast-stretched image
             enhanced_mean = np.mean(cell_gray_enhanced)
@@ -1971,6 +2158,9 @@ class OMRSoftware(QMainWindow):
             
             # Local contrast: high std means there's a mark
             local_contrast_score = cell_gray_std / 10.0  # Normalize
+
+            ink_ratio = float(np.mean(cell_gray < dark_pixel_threshold))
+            center_ink_ratio = float(np.mean(center_gray < dark_pixel_threshold))
             
             # Color-based scores
             if has_color:
@@ -1982,10 +2172,21 @@ class OMRSoftware(QMainWindow):
                 
                 # Saturation difference from overall
                 sat_score = cell_sat_mean - overall_sat_mean
+                color_ratio = float(np.mean(cell_sat > color_pixel_threshold))
+
+                center_sat = cell_sat[center_top:center_bottom, center_left:center_right]
+                if center_sat.size == 0:
+                    center_sat = cell_sat
+                center_color_ratio = float(np.mean(center_sat > color_pixel_threshold))
             else:
                 cell_sat_mean = 0
                 cell_blue_mean = 0
                 sat_score = 0
+                color_ratio = 0.0
+                center_color_ratio = 0.0
+
+            mark_ratio = max(ink_ratio, color_ratio)
+            center_mark_ratio = max(center_ink_ratio, center_color_ratio)
             
             # Combined score: weighted sum of different indicators
             # Higher score = more likely to be filled
@@ -2003,15 +2204,27 @@ class OMRSoftware(QMainWindow):
                 'gray_mean': cell_gray_mean,
                 'gray_std': cell_gray_std,
                 'darkness': darkness_score,
+                'center_darkness': center_darkness_score,
                 'enhanced_dark': enhanced_darkness,
                 'local_contrast': local_contrast_score,
                 'saturation': cell_sat_mean,
                 'sat_score': sat_score,
                 'blue_score': cell_blue_mean,
+                'ink_ratio': ink_ratio,
+                'color_ratio': color_ratio,
+                'mark_ratio': mark_ratio,
+                'center_ink_ratio': center_ink_ratio,
+                'center_color_ratio': center_color_ratio,
+                'center_mark_ratio': center_mark_ratio,
                 'combined': combined_score
             })
             
-            print(f"    Option {option_labels[i]}: gray={cell_gray_mean:.1f}, dark={darkness_score:.1f}, enh_dark={enhanced_darkness:.1f}, contrast={local_contrast_score:.1f}, combined={combined_score:.1f}")
+            print(
+                f"    Option {option_labels[i]}: gray={cell_gray_mean:.1f}, dark={darkness_score:.1f}, "
+                f"enh_dark={enhanced_darkness:.1f}, contrast={local_contrast_score:.1f}, "
+                f"mark_ratio={mark_ratio:.3f}, center_dark={center_darkness_score:.1f}, "
+                f"center_mark={center_mark_ratio:.3f}, combined={combined_score:.1f}"
+            )
         
         # Save debug image with cell divisions and scores
         if save_debug:
@@ -2022,15 +2235,17 @@ class OMRSoftware(QMainWindow):
             
             debug_img = image.copy()
             draw = ImageDraw.Draw(debug_img)
+
+            draw.rectangle([(content_left, 0), (max(content_left + 1, content_right - 1), height - 1)], outline=(0, 128, 255), width=1)
             
             # Draw vertical lines to show cell divisions
             for i in range(1, options_count):
-                x = i * cell_width
+                x = cell_edges[i]
                 draw.line([(x, 0), (x, height)], fill=(255, 0, 0), width=2)
             
             # Draw scores on each cell
             for i, score in enumerate(cell_scores):
-                x = i * cell_width + 2
+                x = cell_edges[i] + 2
                 draw.text((x, 2), f"{score['combined']:.0f}", fill=(255, 0, 0))
             
             debug_path = os.path.join(debug_dir, f"option_{int(time.time()*1000)}.png")
@@ -2038,56 +2253,30 @@ class OMRSoftware(QMainWindow):
             print(f"  Saved debug image: {debug_path}")
         
         # Determine which option(s) are filled using combined score
-        filled_options = []
-        
+        filled_options, decision_info = self._select_filled_options_from_scores(cell_scores)
+
         if cell_scores:
-            combined_vals = [s['combined'] for s in cell_scores]
-            max_combined = max(combined_vals)
-            min_combined = min(combined_vals)
-            score_range = max_combined - min_combined
-            mean_combined = sum(combined_vals) / max(1, len(combined_vals))
-            std_combined = (sum((v - mean_combined) ** 2 for v in combined_vals) / max(1, len(combined_vals))) ** 0.5
-            
-            # Get the max darkness score (actual gray difference from overall mean)
-            max_darkness = max(s['darkness'] for s in cell_scores)
-            
-            print(f"  Score range: {min_combined:.1f} to {max_combined:.1f} (range={score_range:.1f}), max_darkness={max_darkness:.1f}")
-            
-            # SMART DETECTION: Focus on RELATIVE differences between options
-            # Key insight: A filled mark should stand out clearly from other options
-            # Even light marks should have a significant score_range
-            
-            # Primary detection: Check if one option clearly stands out
-            # Uses relative thresholds based on the score distribution
-            
-            # Minimum thresholds - lowered to catch lighter marks
-            MIN_COMBINED_THRESHOLD = 5.0   # Minimum combined score for filled mark
-            MIN_DARKNESS_THRESHOLD = 2.0   # Minimum darkness difference
-            MIN_SCORE_RANGE = 10.0  # Minimum range - the key indicator of a filled mark
-            
-            # For blank detection: if ALL scores are very close and low, it's blank
-            # Only definitely blank if range is very small AND all scores are near zero
-            BLANK_MAX_RANGE = 6.0
-            BLANK_MAX_COMBINED = 5.0
-            
-            # Check if this is clearly blank (all options look the same)
-            is_clearly_blank = (
-                score_range < BLANK_MAX_RANGE and 
-                max_combined < BLANK_MAX_COMBINED
+            min_combined = min(s['combined'] for s in cell_scores)
+            max_combined = max(s['combined'] for s in cell_scores)
+            print(
+                f"  Score range: {min_combined:.1f} to {max_combined:.1f} "
+                f"(range={decision_info.get('score_range', 0.0):.1f}), "
+                f"blank_baseline={decision_info.get('blank_combined_baseline', 0.0):.1f}, "
+                f"blank_mark={decision_info.get('blank_mark_baseline', 0.0):.3f}, "
+                f"blank_center_dark={decision_info.get('blank_center_darkness_baseline', 0.0):.1f}"
             )
-            
-            if is_clearly_blank:
-                print(f"  No option filled: clearly blank (range={score_range:.1f}, max={max_combined:.1f})")
+            reason = decision_info.get('reason', 'unknown')
+            if reason == 'blank':
+                print("  No option filled: clearly blank after blank-baseline comparison")
+            elif filled_options:
+                print("  Selected by blank-baseline comparison")
             else:
-                # Multi-select friendly: any option above minimum thresholds is counted
-                for score in cell_scores:
-                    if (score['combined'] >= MIN_COMBINED_THRESHOLD and
-                        score['darkness'] >= MIN_DARKNESS_THRESHOLD):
-                        filled_options.append(score['option'])
-                if filled_options:
-                    print(f"  Selected by minimum thresholds (min_comb={MIN_COMBINED_THRESHOLD}, min_dark={MIN_DARKNESS_THRESHOLD})")
-                else:
-                    print(f"  No option filled: scores below minimum (min_comb={MIN_COMBINED_THRESHOLD}, min_dark={MIN_DARKNESS_THRESHOLD})")
+                thresholds = decision_info.get('thresholds', {})
+                print(
+                    "  No option filled: scores did not clear blank-baseline thresholds "
+                    f"(min_margin={thresholds.get('min_combined_margin', 0.0):.1f}, "
+                    f"min_mark_margin={thresholds.get('min_mark_margin', 0.0):.3f})"
+                )
         
         # Remove duplicates while preserving order (avoid outputs like CDCD)
         seen = set()
@@ -2103,15 +2292,12 @@ class OMRSoftware(QMainWindow):
             record = {
                 "context": context or {},
                 "options_count": options_count,
+                "content_bounds": [content_left, content_right],
+                "cell_edges": cell_edges,
                 "scores": cell_scores,
                 "result": result,
-                "thresholds": {
-                    "min_combined": MIN_COMBINED_THRESHOLD,
-                    "min_darkness": MIN_DARKNESS_THRESHOLD,
-                    "min_score_range": MIN_SCORE_RANGE,
-                    "blank_max_range": BLANK_MAX_RANGE,
-                    "blank_max_combined": BLANK_MAX_COMBINED
-                }
+                "thresholds": decision_info.get("thresholds", {}),
+                "decision": decision_info,
             }
             if hasattr(self, "debug_records"):
                 self.debug_records.append(record)
@@ -3296,6 +3482,14 @@ class OMRSoftware(QMainWindow):
 
         dialog.exec_()
 
+    def _get_page_offset(self, page_idx):
+        """Return the explicit page offset, or fall back to page 0's offset."""
+        if page_idx in self.page_offsets:
+            return self.page_offsets[page_idx]
+        if 0 in self.page_offsets:
+            return self.page_offsets[0]
+        return (0, 0)
+
     def load_page(self, p_idx, apply_corrections=True):
         if not self.pdf_document: return
         
@@ -3348,9 +3542,8 @@ class OMRSoftware(QMainWindow):
         self.current_pixmap_item = MovablePixmapItem(pix_item)
         
         # Restore offset
-        if p_idx in self.page_offsets:
-            off = self.page_offsets[p_idx]
-            self.current_pixmap_item.setPos(off[0], off[1])
+        off = self._get_page_offset(p_idx)
+        self.current_pixmap_item.setPos(off[0], off[1])
             
         self.scene.addItem(self.current_pixmap_item)
         # Move pixmap to back so marks are visible on top
@@ -3562,7 +3755,7 @@ class OMRSoftware(QMainWindow):
             # If user moved the image, marks are relative to scene origin (0,0)
             # Image is at (off_x, off_y), so to get image-relative coords:
             # image_x = scene_x - off_x
-            off_x, off_y = self.page_offsets.get(p_idx, (0, 0))
+            off_x, off_y = self._get_page_offset(p_idx)
             
             page_res = {
                 "options": {},
@@ -3749,7 +3942,7 @@ class OMRSoftware(QMainWindow):
                 if dx != 0.0 or dy != 0.0:
                     img_pil = Image.fromarray(img_aligned)
 
-            off_x, off_y = self.page_offsets.get(p_idx, (0, 0))
+            off_x, off_y = self._get_page_offset(p_idx)
 
             page_res = {
                 "options": {},
@@ -4141,7 +4334,7 @@ class OMRSoftware(QMainWindow):
             opts = page_results.get("options", {})
 
             # Offset for this page (if the PDF was moved in the scene)
-            off_x, off_y = self.page_offsets.get(page_idx, (0, 0))
+            off_x, off_y = self._get_page_offset(page_idx)
             
             # Draw marks and answers
             page_score = 0
@@ -4626,7 +4819,7 @@ class OMRSoftware(QMainWindow):
                 img_np, (dx, dy), response = self.align_image(img_np, p_idx)
 
             h, w = img_np.shape[:2]
-            off_x, off_y = self.page_offsets.get(p_idx, (0, 0))
+            off_x, off_y = self._get_page_offset(p_idx)
 
             page_result = {"text": {}, "options": {}}
 
@@ -5012,7 +5205,7 @@ class OMRSoftware(QMainWindow):
             
             page_results = self.results.get(page_idx, {}) if hasattr(self, 'results') else {}
             opts = page_results.get("options", {})
-            off_x, off_y = self.page_offsets.get(page_idx, (0, 0))
+            off_x, off_y = self._get_page_offset(page_idx)
             page_score = 0
             page_total = 0
             

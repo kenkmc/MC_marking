@@ -22,6 +22,19 @@ hiddenimports = []
 datas = []
 binaries = []
 
+
+def collect_tree(src_dir, dest_root):
+    collected = []
+    if not os.path.isdir(src_dir):
+        return collected
+
+    for root, _, files in os.walk(src_dir):
+        rel_root = os.path.relpath(root, src_dir)
+        dest_dir = dest_root if rel_root == "." else os.path.join(dest_root, rel_root)
+        for file_name in files:
+            collected.append((os.path.join(root, file_name), dest_dir))
+    return collected
+
 for pkg in packages:
     try:
         pkg_datas, pkg_bins, pkg_hidden = collect_all(pkg)
@@ -34,6 +47,7 @@ for pkg in packages:
 
 # Include sample template (optional)
 datas += [("template.json", ".")]
+datas += collect_tree("template", "template")
 
 
 a = Analysis(

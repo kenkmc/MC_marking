@@ -3,7 +3,7 @@ import os
 import sys
 
 src_dir = r"D:\python\MC_marking\dist\CheckMate"
-out_zip = r"D:\python\MC_marking\dist\CheckMate_v1.6.1.zip"
+out_zip = r"D:\python\MC_marking\dist\CheckMate_v1.6.3.zip"
 
 count = 0
 with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as zf:
