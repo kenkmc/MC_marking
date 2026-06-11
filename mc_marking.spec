@@ -10,6 +10,20 @@ icon = icon_path if os.path.exists(icon_path) else None
 hiddenimports = []
 datas = []
 binaries = []
+excludes = [
+    "PyQt6",
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets",
+    "paddle",
+    "paddleocr",
+    "paddlex",
+    "tensorboard",
+    "tensorflow",
+    "tkinter",
+    "_tkinter",
+    "modelscope",
+]
 
 
 def collect_tree(src_dir, dest_root):
@@ -38,7 +52,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
