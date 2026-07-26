@@ -1,68 +1,199 @@
-name: Build And Release
+name: Build and release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to build and publish
+        description: Release tag (must match APP_VERSION)
         required: true
-        default: v1.6.4
+        default: v1.7.0
+        type: string
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-release:
+    name: Windows executable and installer
     runs-on: windows-latest
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout
+      - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Resolve release version
+        id: release
+        shell: pwsh
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.tag }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          $tag = $env:RELEASE_TAG_INPUT
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = $env:RELEASE_REF_NAME
+          }
+          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "Release tag must use vMAJOR.MINOR.PATCH: $tag"
+          }
+          $version = $tag.Substring(1)
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          cache: 'pip'
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ocr.txt
+            requirements-build.txt
 
-      - name: Install Dependencies
+      - name: Verify release metadata
+        shell: pwsh
+        run: python scripts/verify_release.py '${{ steps.release.outputs.tag }}'
+
+      - name: Install build dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install pyinstaller PyQt5 PyMuPDF openpyxl opencv-python pillow numpy psutil pytesseract pyclipper python-bidi PyYAML ninja scipy scikit-image shapely
-          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          python -m pip install easyocr --no-deps
+          if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed ($LASTEXITCODE)." }
+          python -m pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cpu
+          if ($LASTEXITCODE -ne 0) { throw "CPU Torch install failed ($LASTEXITCODE)." }
+          python -m pip install -r requirements-build.txt
+          if ($LASTEXITCODE -ne 0) { throw "Dependency install failed ($LASTEXITCODE)." }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw "pip check failed ($LASTEXITCODE)." }
 
-      - name: Build Executable
+      - name: Run automated tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { throw "Unit tests failed ($LASTEXITCODE)." }
+          python -m py_compile main.py omr_core.py omr_software.py
+          if ($LASTEXITCODE -ne 0) { throw "Syntax checks failed ($LASTEXITCODE)." }
+          python main.py --smoke-test
+          if ($LASTEXITCODE -ne 0) { throw "Source smoke test failed ($LASTEXITCODE)." }
+
+      - name: Build portable application
         shell: pwsh
         run: |
-          pyinstaller --noconfirm .\mc_marking.spec
+          python -m PyInstaller --clean --noconfirm .\mc_marking.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)." }
+          Copy-Item -LiteralPath .\LICENSE -Destination .\dist\CheckMate\LICENSE -Force
+          Copy-Item -LiteralPath .\README.md -Destination .\dist\CheckMate\README.md -Force
 
-      - name: Package Release Zip
-        id: package
+      - name: Smoke-test portable application
         shell: pwsh
         run: |
-          $tag = '${{ github.event.inputs.tag }}'
-          if ([string]::IsNullOrWhiteSpace($tag)) {
-            $tag = '${{ github.ref_name }}'
+          $exe = Resolve-Path .\dist\CheckMate\CheckMate.exe
+          if (-not (Test-Path .\dist\CheckMate\_internal\base_library.zip)) {
+            throw "PyInstaller runtime is incomplete."
           }
-          $zipName = "CheckMate_${tag}.zip"
-          if (Test-Path $zipName) {
-            Remove-Item $zipName -Force
+          if (-not (Test-Path .\dist\CheckMate\_internal\template.json)) {
+            throw "Bundled sample template is missing."
           }
-          Compress-Archive -Path .\dist\CheckMate\* -DestinationPath $zipName -CompressionLevel Optimal
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if (-not (Test-Path .\dist\CheckMate\LICENSE)) {
+            throw "GPL license is missing from the distribution."
+          }
+          $process = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "CheckMate smoke test timed out."
+          }
+          $process.Refresh()
+          if ($process.ExitCode -ne 0) {
+            throw "CheckMate smoke test failed with exit code $($process.ExitCode)."
+          }
 
-      - name: Publish Release
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --version=6.7.1 -y --no-progress
+
+      - name: Package ZIP and installer
+        shell: pwsh
+        run: |
+          $version = '${{ steps.release.outputs.version }}'
+          python make_zip.py --version $version
+          if ($LASTEXITCODE -ne 0) { throw "ZIP packaging failed ($LASTEXITCODE)." }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DOutputBaseFilename=CheckMate_Setup_v$version" .\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)." }
+
+          $assets = @(
+            ".\dist\CheckMate_v$version.zip",
+            ".\dist\CheckMate_Setup_v$version.exe"
+          )
+          $hashLines = foreach ($asset in $assets) {
+            $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $(Split-Path -Leaf $asset)"
+          }
+          $hashLines | Set-Content -LiteralPath .\dist\SHA256SUMS.txt -Encoding ascii
+
+      - name: Smoke-test installer
+        shell: pwsh
+        run: |
+          $version = '${{ steps.release.outputs.version }}'
+          $installer = Resolve-Path ".\dist\CheckMate_Setup_v$version.exe"
+          $installDir = Join-Path $env:RUNNER_TEMP "CheckMateSmoke"
+          & $installer /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- "/DIR=$installDir"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer failed with exit code $LASTEXITCODE."
+          }
+
+          $appExe = Join-Path $installDir "CheckMate.exe"
+          if (-not (Test-Path -LiteralPath $appExe)) {
+            throw "Installed executable was not found."
+          }
+          $process = Start-Process -FilePath $appExe -ArgumentList '--smoke-test' -PassThru
+          if (-not $process.WaitForExit(30000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "Installed application smoke test timed out."
+          }
+          $process.Refresh()
+          if ($process.ExitCode -ne 0) {
+            throw "Installed application smoke test failed with exit code $($process.ExitCode)."
+          }
+
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (Test-Path -LiteralPath $uninstaller) {
+            & $uninstaller /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+            if ($LASTEXITCODE -ne 0) {
+              throw "Uninstaller failed with exit code $LASTEXITCODE."
+            }
+          }
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CheckMate-${{ steps.release.outputs.version }}-windows
+          path: |
+            dist/CheckMate_v${{ steps.release.outputs.version }}.zip
+            dist/CheckMate_Setup_v${{ steps.release.outputs.version }}.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.package.outputs.tag }}
-          name: CheckMate ${{ steps.package.outputs.tag }}
-          draft: false
-          files: ${{ steps.package.outputs.zip_name }}
+          tag_name: ${{ steps.release.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: CheckMate ${{ steps.release.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          generate_release_notes: true
           fail_on_unmatched_files: true
-          append_body: true
+          files: |
+            dist/CheckMate_v${{ steps.release.outputs.version }}.zip
+            dist/CheckMate_Setup_v${{ steps.release.outputs.version }}.exe
+            dist/SHA256SUMS.txt

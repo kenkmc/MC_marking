@@ -2,6 +2,8 @@
 
 import os
 
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
 block_cipher = None
 
 icon_path = os.path.abspath("app.ico")
@@ -20,10 +22,27 @@ excludes = [
     "paddlex",
     "tensorboard",
     "tensorflow",
+    "matplotlib",
+    "IPython",
+    "ipykernel",
+    "jupyter",
+    "notebook",
+    "zmq",
+    "pandas",
+    "pytest",
     "tkinter",
     "_tkinter",
     "modelscope",
+    "torch.utils.benchmark",
+    "torch.utils.bottleneck",
+    "functorch",
 ]
+
+# EasyOCR imports language modules dynamically and reads packaged character data.
+# Collecting them explicitly prevents a frozen build from passing startup while
+# failing only when the user first runs text recognition.
+hiddenimports += collect_submodules("easyocr")
+datas += collect_data_files("easyocr")
 
 
 def collect_tree(src_dir, dest_root):
@@ -40,6 +59,7 @@ def collect_tree(src_dir, dest_root):
 
 # Include sample template (optional)
 datas += [("template.json", ".")]
+datas += [("LICENSE", ".")]
 datas += collect_tree("template", "template")
 
 
@@ -70,11 +90,12 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,  # GUI app
     icon=icon,
+    version=os.path.abspath("version_info.txt"),
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -88,7 +109,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name="CheckMate",
 )

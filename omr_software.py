@@ -51,13 +51,21 @@ import urllib.request
 import tempfile
 import subprocess
 
+from omr_core import (
+    deskew_image as core_deskew_image,
+    detect_filled_options,
+    estimate_similarity_transform,
+    estimate_option_content_bounds,
+    select_filled_options,
+)
+
 # Mark types
 MARK_TYPE_TEXT = "text"      # Text field (e.g., student name, ID)
 MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.7.0"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -175,6 +183,8 @@ _TRANSLATIONS = {
         "lbl_ocr_not_available": "Not Available",
         "btn_recognize_all": "Recognize All Pages",
         "btn_recognize_sel": "Re-recognize Selected Pages...",
+        "chk_recognize_text": "Recognize text fields with OCR (slower)",
+        "chk_save_debug": "Save diagnostic images (slower)",
         "chk_export_images": "Include images with answers",
         "btn_export_bundle": "Export Results (Excel + Images)",
         "btn_export_excel": "Export to Excel",
@@ -202,11 +212,15 @@ _TRANSLATIONS = {
         "col_detected": "Detected",
         "col_correct": "Correct",
         "col_points": "Points",
+        "col_confidence": "Confidence",
         "col_crop": "Crop",
+        "btn_next_review": "Next item to review",
+        "tip_next_review": "Jump to the next blank, multiple, invalid, or low-confidence answer",
         "lbl_score": "Page Score: {score}",
         "lbl_total": "Total: 0",
         "lbl_answer_status_empty": "Empty: {questions}",
         "lbl_answer_status_multi": "Multiple: {questions}",
+        "lbl_answer_status_review": "Review: {questions}",
         "lbl_answer_status_ok": "All answered ✓",
         # Dialogs
         "dlg_student_title": "Student Info (Manual / Paste)",
@@ -228,6 +242,9 @@ _TRANSLATIONS = {
         "msg_no_results": "No results to export",
         "msg_recognition_complete": "Processed {pages} pages.\nRecognized {options} option fields.",
         "msg_recognition_title": "Recognition Complete",
+        "msg_no_review": "No answers are currently flagged for review.",
+        "msg_drop_pdf": "Drop a PDF here to open it.",
+        "crop_preview_title": "Answer crop – Page {page}, Q{question}",
         "msg_clipboard_empty": "Clipboard is empty.",
         "msg_no_questions": "No questions found to label.",
         "msg_no_text_fields": "No text fields found or defined.",
@@ -300,6 +317,8 @@ _TRANSLATIONS = {
         "lbl_ocr_not_available": "未找到",
         "btn_recognize_all": "辨識所有頁面",
         "btn_recognize_sel": "重新辨識選定頁面...",
+        "chk_recognize_text": "辨識文字欄位（較慢）",
+        "chk_save_debug": "儲存診斷圖片（較慢）",
         "chk_export_images": "包含答案標註圖片",
         "btn_export_bundle": "匯出結果（Excel + 圖片）",
         "btn_export_excel": "匯出 Excel",
@@ -327,11 +346,15 @@ _TRANSLATIONS = {
         "col_detected": "偵測",
         "col_correct": "正確",
         "col_points": "分數",
+        "col_confidence": "信心度",
         "col_crop": "裁剪",
+        "btn_next_review": "下一個待覆核項目",
+        "tip_next_review": "跳至下一個空白、多選、無效或低信心度答案",
         "lbl_score": "本頁分數：{score}",
         "lbl_total": "總計：0",
         "lbl_answer_status_empty": "空白：{questions}",
         "lbl_answer_status_multi": "多選：{questions}",
+        "lbl_answer_status_review": "待覆核：{questions}",
         "lbl_answer_status_ok": "全部已作答 ✓",
         # Dialogs
         "dlg_student_title": "學生資料（手動 / 貼上）",
@@ -353,6 +376,9 @@ _TRANSLATIONS = {
         "msg_no_results": "沒有可匯出的結果",
         "msg_recognition_complete": "已處理 {pages} 頁。\n已辨識 {options} 個選項欄。",
         "msg_recognition_title": "辨識完成",
+        "msg_no_review": "目前沒有需要覆核的答案。",
+        "msg_drop_pdf": "把 PDF 拖放到這裡即可開啟。",
+        "crop_preview_title": "答案裁剪 – 第 {page} 頁，Q{question}",
         "msg_clipboard_empty": "剪貼簿是空的。",
         "msg_no_questions": "找不到題目。",
         "msg_no_text_fields": "未找到或未定義文字欄位。",
@@ -426,67 +452,9 @@ def get_language():
 
 
 def deskew_image(img_array):
-    """
-    Detect and correct skew in scanned page.
-    Returns corrected image and the skew angle.
-    """
-    # Convert to grayscale if needed
-    if len(img_array.shape) == 3:
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    else:
-        gray = img_array.copy()
-    
-    # Apply edge detection
-    edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    
-    # Detect lines using Hough transform
-    lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=100, 
-                            minLineLength=100, maxLineGap=10)
-    
-    if lines is None or len(lines) == 0:
-        return img_array, 0.0
-    
-    # Calculate angles of detected lines
-    angles = []
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        if x2 - x1 != 0:
-            angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
-            # Only consider near-horizontal lines (within 15 degrees)
-            if abs(angle) < 15:
-                angles.append(angle)
-    
-    if not angles:
-        return img_array, 0.0
-    
-    # Get median angle (more robust than mean)
-    skew_angle = np.median(angles)
-    
-    # Don't correct very small angles
-    if abs(skew_angle) < 0.3:
-        return img_array, 0.0
-    
-    # Rotate image to correct skew
-    h, w = img_array.shape[:2]
-    center = (w // 2, h // 2)
-    rotation_matrix = cv2.getRotationMatrix2D(center, skew_angle, 1.0)
-    
-    # Calculate new bounding box size
-    cos = np.abs(rotation_matrix[0, 0])
-    sin = np.abs(rotation_matrix[0, 1])
-    new_w = int((h * sin) + (w * cos))
-    new_h = int((h * cos) + (w * sin))
-    
-    # Adjust rotation matrix for new size
-    rotation_matrix[0, 2] += (new_w / 2) - center[0]
-    rotation_matrix[1, 2] += (new_h / 2) - center[1]
-    
-    # Apply rotation with white background
-    corrected = cv2.warpAffine(img_array, rotation_matrix, (new_w, new_h), 
-                               borderMode=cv2.BORDER_CONSTANT, 
-                               borderValue=(255, 255, 255) if len(img_array.shape) == 3 else 255)
-    
-    return corrected, skew_angle
+    """Detect and correct a small scan skew without changing page dimensions."""
+
+    return core_deskew_image(img_array)
 
 
 # Modern Style Sheet
@@ -825,7 +793,10 @@ class MarkItem(QGraphicsRectItem):
         self.update()  # Trigger repaint
 
     def get_data(self):
-        scene_rect = self.sceneBoundingRect()
+        # QGraphicsItem.sceneBoundingRect() includes the pen width.  Saving
+        # that expanded box made templates grow and drift by one pixel on
+        # every save/load cycle, so persist the actual rectangle geometry.
+        scene_rect = self.mapRectToScene(self.rect()).boundingRect()
         return {
             "type": self.mark_type,
             "question": self.question_num,
@@ -1090,11 +1061,16 @@ class OMRSoftware(QMainWindow):
         self.current_pixmap_item = None
         self.answer_key = {}
         self.first_page_key = False
+        self.results = {}
         self.align_reference_gray = None
         self.align_reference_size = None
         self.align_reference_offset = None
         self.topic_map = {}
         self.debug_records = []
+        self._last_detection = {}
+        self._review_cursor = None
+        self._session_temp = tempfile.TemporaryDirectory(prefix="checkmate_")
+        self.debug_dir = os.path.join(self._session_temp.name, "debug_crops")
         self.student_absence = {}  # page_idx -> bool (True if absent)
         self.extra_students = []   # Extra student records beyond PDF pages
         self.student_order = []    # Ordered list: [{"text":{...}, "absent":bool, "page_idx": int or None}, ...]
@@ -1104,6 +1080,20 @@ class OMRSoftware(QMainWindow):
         self._update_thread = None
 
         self.init_ui()
+
+    def closeEvent(self, event):
+        """Release the active PDF and per-session diagnostic cache."""
+
+        try:
+            if self.pdf_document is not None:
+                self.pdf_document.close()
+        except Exception:
+            pass
+        try:
+            self._session_temp.cleanup()
+        except Exception:
+            pass
+        super().closeEvent(event)
         
     def init_ocr(self):
         if self.ocr_engine_name == "easyocr":
@@ -1240,6 +1230,7 @@ class OMRSoftware(QMainWindow):
         self.align_reference_gray = None
         self.align_reference_bounds = None
         self.align_reference_offset = None
+        self.align_reference_shape = None
 
     def _align_init_template(self, img_np, page_idx):
         """Extract and store alignment templates from the first (reference) page.
@@ -1252,6 +1243,7 @@ class OMRSoftware(QMainWindow):
             gray = img_np.copy()
         
         self.align_templates = []
+        self.align_reference_shape = (h, w)
         reference_offset = self._get_page_offset(0)
         self.align_reference_offset = (float(reference_offset[0]), float(reference_offset[1]))
         
@@ -1324,7 +1316,8 @@ class OMRSoftware(QMainWindow):
         margin = max(120, min(int(min(w, h) * 0.08), 250))
         
         # Match each template and collect shift estimates
-        shift_estimates = []  # List of (dx, dy, confidence, template_idx)
+        # (dx, dy, confidence, template_idx, current_center, reference_center)
+        shift_estimates = []
         
         for t_idx, tmpl in enumerate(self.align_templates):
             ref_x, ref_y = tmpl['pos']
@@ -1411,7 +1404,24 @@ class OMRSoftware(QMainWindow):
                 continue
             
             print(f"  Template align #{t_idx+1}: Best ({best_name}) shift=({t_dx:.2f},{t_dy:.2f}), conf={effective_confidence:.3f}")
-            shift_estimates.append((t_dx, t_dy, effective_confidence, t_idx))
+            current_center = (
+                float(match_x + ref_w / 2.0),
+                float(match_y + ref_h / 2.0),
+            )
+            reference_center = (
+                float(ref_x + ref_w / 2.0),
+                float(ref_y + ref_h / 2.0),
+            )
+            shift_estimates.append(
+                (
+                    t_dx,
+                    t_dy,
+                    effective_confidence,
+                    t_idx,
+                    current_center,
+                    reference_center,
+                )
+            )
         
         # === Combine shift estimates from all templates ===
         if not shift_estimates:
@@ -1422,18 +1432,73 @@ class OMRSoftware(QMainWindow):
             return img_np, (0.0, 0.0), 0.0
         
         if len(shift_estimates) == 1:
-            dx, dy, effective_confidence, _ = shift_estimates[0]
+            dx, dy, effective_confidence, _, _, _ = shift_estimates[0]
             print(f"  Template align: Using single template shift=({dx:.2f},{dy:.2f})")
         else:
+            source_points = [estimate[4] for estimate in shift_estimates]
+            target_points = [estimate[5] for estimate in shift_estimates]
+            affine, affine_quality = estimate_similarity_transform(
+                source_points,
+                target_points,
+                ransac_threshold=3.0,
+            )
+            if affine is not None:
+                if len(img_np.shape) == 3:
+                    border_value = (255, 255, 255)
+                else:
+                    border_value = 255
+                ref_h, ref_w = self.align_reference_shape or (h, w)
+                aligned = cv2.warpAffine(
+                    img_np,
+                    affine,
+                    (int(ref_w), int(ref_h)),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=border_value,
+                )
+                average_match_confidence = sum(
+                    estimate[2] for estimate in shift_estimates
+                ) / len(shift_estimates)
+                inlier_ratio = (
+                    affine_quality["inliers"]
+                    / max(1, affine_quality["total_points"])
+                )
+                residual_factor = max(
+                    0.0, 1.0 - affine_quality["rms_error"] / 4.0
+                )
+                effective_confidence = max(
+                    0.0,
+                    min(
+                        1.0,
+                        average_match_confidence
+                        * (0.75 + 0.25 * inlier_ratio)
+                        * (0.75 + 0.25 * residual_factor),
+                    ),
+                )
+                dx = float(affine[0, 2])
+                dy = float(affine[1, 2])
+                print(
+                    "  Template align: ✓ affine "
+                    f"inliers={affine_quality['inliers']}/{affine_quality['total_points']}, "
+                    f"rms={affine_quality['rms_error']:.2f}px, "
+                    f"scale={affine_quality['scale']:.4f}, "
+                    f"rotation={affine_quality['rotation']:.3f}°"
+                )
+                return aligned, (dx, dy), effective_confidence
+
             # Weighted average of shifts by confidence
-            total_weight = sum(conf for _, _, conf, _ in shift_estimates)
-            dx = sum(sdx * conf for sdx, _, conf, _ in shift_estimates) / total_weight
-            dy = sum(sdy * conf for _, sdy, conf, _ in shift_estimates) / total_weight
+            total_weight = sum(estimate[2] for estimate in shift_estimates)
+            dx = sum(
+                estimate[0] * estimate[2] for estimate in shift_estimates
+            ) / total_weight
+            dy = sum(
+                estimate[1] * estimate[2] for estimate in shift_estimates
+            ) / total_weight
             effective_confidence = total_weight / len(shift_estimates)
             
             # Check consistency: if shifts disagree by more than 5px, use median instead
-            dxs = [sdx for sdx, _, _, _ in shift_estimates]
-            dys = [sdy for _, sdy, _, _ in shift_estimates]
+            dxs = [estimate[0] for estimate in shift_estimates]
+            dys = [estimate[1] for estimate in shift_estimates]
             dx_range = max(dxs) - min(dxs)
             dy_range = max(dys) - min(dys)
             
@@ -2029,7 +2094,7 @@ class OMRSoftware(QMainWindow):
 
         return left, right
 
-    def detect_filled_option(self, image, options_count=4, save_debug=False, context=None):
+    def _detect_filled_option_legacy(self, image, options_count=4, save_debug=False, context=None):
         """
         Detect which option is filled in a multiple choice bubble area.
         Divides the image into options_count cells and checks which one is filled.
@@ -2233,7 +2298,7 @@ class OMRSoftware(QMainWindow):
         # Save debug image with cell divisions and scores
         if save_debug:
             from PIL import ImageDraw, ImageFont
-            debug_dir = "debug_crops"
+            debug_dir = self.debug_dir
             os.makedirs(debug_dir, exist_ok=True)
             import time
             
@@ -2320,6 +2385,94 @@ class OMRSoftware(QMainWindow):
 
         return result
 
+    def detect_filled_option(self, image, options_count=4, save_debug=False, context=None):
+        """Detect an OMR response and retain confidence data for review.
+
+        The production decision logic lives in :mod:`omr_core`, so it is shared
+        by interactive, selected-page, and batch recognition and can be covered
+        by automated tests.  The previous implementation remains available as
+        a guarded fallback for an unexpected image-format edge case.
+        """
+
+        context = context or {}
+        try:
+            detection = detect_filled_options(image, options_count)
+        except Exception as exc:
+            print(f"OMR core failed; using compatibility detector: {exc}")
+            result = self._detect_filled_option_legacy(
+                image,
+                options_count,
+                save_debug=save_debug,
+                context=context,
+            )
+            self._last_detection = {
+                "answer": result,
+                "confidence": 0.0,
+                "needs_review": True,
+                "reason": "fallback",
+                "cell_scores": [],
+                "decision": {"reason": "fallback", "error": str(exc)},
+            }
+            return result
+
+        result = detection.answer
+        detection_record = detection.as_record()
+        self._last_detection = detection_record
+
+        correct_answer = context.get("correct_answer", "")
+        question_num = context.get("question")
+        if not correct_answer and question_num is not None and hasattr(self, "answer_key"):
+            correct_answer = (
+                self.answer_key.get(question_num, "")
+                or self.answer_key.get(str(question_num), "")
+            )
+        normalized_result = "".join(str(result).split()).upper()
+        normalized_correct = "".join(str(correct_answer).split()).upper()
+        if save_debug:
+            record = {
+                "context": context,
+                "options_count": options_count,
+                "content_bounds": list(detection.content_bounds),
+                "cell_edges": list(detection.cell_edges),
+                "scores": [dict(score) for score in detection.cell_scores],
+                "result": result,
+                "confidence": detection.confidence,
+                "needs_review": detection.needs_review,
+                "reason": detection.reason,
+                "correct_answer": correct_answer,
+                "is_correct": bool(
+                    normalized_correct and normalized_result == normalized_correct
+                ),
+                "thresholds": detection.decision.get("thresholds", {}),
+                "decision": detection.decision,
+            }
+            self.debug_records.append(record)
+            try:
+                from PIL import ImageDraw
+
+                debug_img = (
+                    image.copy()
+                    if isinstance(image, Image.Image)
+                    else Image.fromarray(np.asarray(image).astype(np.uint8))
+                )
+                draw = ImageDraw.Draw(debug_img)
+                height = debug_img.height
+                for edge in detection.cell_edges[1:-1]:
+                    draw.line([(edge, 0), (edge, height)], fill=(220, 30, 30), width=1)
+                colour = (0, 130, 0) if not detection.needs_review else (230, 130, 0)
+                draw.text(
+                    (2, 1),
+                    f"{result or '-'} {detection.confidence:.0%}",
+                    fill=colour,
+                )
+                label = context.get("label") or f"Q{question_num or 'unknown'}"
+                page_idx = max(0, int(context.get("page", 1)) - 1)
+                self._save_crop_image(debug_img, page_idx, label, "omr_debug")
+            except Exception as exc:
+                print(f"Could not save OMR diagnostic image: {exc}")
+
+        return result
+
     def get_ocr_result(self, image, save_debug=False):
         """Perform OCR on the given PIL image and return text with confidence info."""
         import numpy as np
@@ -2328,8 +2481,7 @@ class OMRSoftware(QMainWindow):
         
         # Debug: Save cropped image to see what's being recognized
         if save_debug:
-            import os
-            debug_dir = "debug_crops"
+            debug_dir = self.debug_dir
             os.makedirs(debug_dir, exist_ok=True)
             import time
             debug_path = os.path.join(debug_dir, f"crop_{int(time.time()*1000)}.png")
@@ -2382,8 +2534,7 @@ class OMRSoftware(QMainWindow):
         orig_np, gray_np, bin_np = preprocess_for_ocr(image)
 
         if save_debug:
-            import os
-            debug_dir = "debug_crops"
+            debug_dir = self.debug_dir
             os.makedirs(debug_dir, exist_ok=True)
             import time
             base = int(time.time()*1000)
@@ -2452,6 +2603,7 @@ class OMRSoftware(QMainWindow):
     def init_ui(self):
         self.setWindowTitle(f"{tr('app_title')}  v{APP_VERSION}")
         self.setGeometry(100, 100, 1400, 850)
+        self.setAcceptDrops(True)
         
         # --- Menu Bar ---
         menubar = self.menuBar()
@@ -2510,19 +2662,34 @@ class OMRSoftware(QMainWindow):
         f_layout = QVBoxLayout(file_grp)
         
         btn_import = QPushButton(tr("btn_import_pdf"))
+        btn_import.setShortcut("Ctrl+O")
         btn_import.clicked.connect(self.import_pdf)
         f_layout.addWidget(btn_import)
         
         self.check_first_key = QCheckBox(tr("chk_first_key"))
-        self.check_first_key.stateChanged.connect(lambda s: setattr(self, 'first_page_key', s == Qt.Checked))
+        self.check_first_key.setChecked(
+            self._settings.value("first_page_key", False, type=bool)
+        )
+        self.first_page_key = self.check_first_key.isChecked()
+        self.check_first_key.stateChanged.connect(self._on_first_key_changed)
         f_layout.addWidget(self.check_first_key)
         
         self.check_auto_deskew = QCheckBox(tr("chk_auto_deskew"))
-        self.check_auto_deskew.setChecked(False)
+        self.check_auto_deskew.setChecked(
+            self._settings.value("auto_deskew", True, type=bool)
+        )
+        self.check_auto_deskew.toggled.connect(
+            lambda value: self._settings.setValue("auto_deskew", value)
+        )
         f_layout.addWidget(self.check_auto_deskew)
 
         self.check_auto_align = QCheckBox(tr("chk_auto_align"))
-        self.check_auto_align.setChecked(False)
+        self.check_auto_align.setChecked(
+            self._settings.value("auto_align", True, type=bool)
+        )
+        self.check_auto_align.toggled.connect(
+            lambda value: self._settings.setValue("auto_align", value)
+        )
         f_layout.addWidget(self.check_auto_align)
         
         left_layout.addWidget(file_grp)
@@ -2569,8 +2736,10 @@ class OMRSoftware(QMainWindow):
         
         row3 = QHBoxLayout()
         btn_import_templ = QPushButton(tr("btn_load_template"))
+        btn_import_templ.setShortcut("Ctrl+L")
         btn_import_templ.clicked.connect(self.import_template)
         btn_export_templ = QPushButton(tr("btn_save_template"))
+        btn_export_templ.setShortcut("Ctrl+Shift+S")
         btn_export_templ.clicked.connect(self.export_template)
         row3.addWidget(btn_import_templ)
         row3.addWidget(btn_export_templ)
@@ -2587,6 +2756,7 @@ class OMRSoftware(QMainWindow):
         p_layout.addWidget(lbl_ocr)
         
         btn_process = QPushButton(tr("btn_recognize_all"))
+        btn_process.setShortcut("Ctrl+R")
         btn_process.clicked.connect(self.run_recognition_all)
         p_layout.addWidget(btn_process)
 
@@ -2594,8 +2764,31 @@ class OMRSoftware(QMainWindow):
         btn_rerecognize.clicked.connect(self.run_recognition_selected)
         p_layout.addWidget(btn_rerecognize)
 
+        self.check_recognize_text = QCheckBox(tr("chk_recognize_text"))
+        self.check_recognize_text.setChecked(
+            self._settings.value("recognize_text", True, type=bool)
+        )
+        self.check_recognize_text.toggled.connect(
+            lambda value: self._settings.setValue("recognize_text", value)
+        )
+        p_layout.addWidget(self.check_recognize_text)
+
+        self.check_save_debug = QCheckBox(tr("chk_save_debug"))
+        self.check_save_debug.setChecked(
+            self._settings.value("save_debug", False, type=bool)
+        )
+        self.check_save_debug.toggled.connect(
+            lambda value: self._settings.setValue("save_debug", value)
+        )
+        p_layout.addWidget(self.check_save_debug)
+
         self.check_export_images = QCheckBox(tr("chk_export_images"))
-        self.check_export_images.setChecked(True)
+        self.check_export_images.setChecked(
+            self._settings.value("export_images", True, type=bool)
+        )
+        self.check_export_images.toggled.connect(
+            lambda value: self._settings.setValue("export_images", value)
+        )
         p_layout.addWidget(self.check_export_images)
 
         btn_export_all = QPushButton(tr("btn_export_bundle"))
@@ -2611,11 +2804,21 @@ class OMRSoftware(QMainWindow):
         p_layout.addWidget(btn_student_info)
 
         self.check_include_summary = QCheckBox(tr("chk_include_summary"))
-        self.check_include_summary.setChecked(True)
+        self.check_include_summary.setChecked(
+            self._settings.value("include_summary", True, type=bool)
+        )
+        self.check_include_summary.toggled.connect(
+            lambda value: self._settings.setValue("include_summary", value)
+        )
         p_layout.addWidget(self.check_include_summary)
 
         self.check_include_topics = QCheckBox(tr("chk_include_topics"))
-        self.check_include_topics.setChecked(True)
+        self.check_include_topics.setChecked(
+            self._settings.value("include_topics", True, type=bool)
+        )
+        self.check_include_topics.toggled.connect(
+            lambda value: self._settings.setValue("include_topics", value)
+        )
         p_layout.addWidget(self.check_include_topics)
 
         btn_topics = QPushButton(tr("btn_set_topics"))
@@ -2723,14 +2926,27 @@ class OMRSoftware(QMainWindow):
         right_layout.addWidget(QLabel(tr("lbl_results")))
         
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels([tr("col_q"), tr("col_detected"), tr("col_correct"), tr("col_points"), tr("col_crop")])
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels([
+            tr("col_q"),
+            tr("col_detected"),
+            tr("col_correct"),
+            tr("col_points"),
+            tr("col_confidence"),
+            tr("col_crop"),
+        ])
         self.table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         self.table.cellChanged.connect(self.on_table_edit)
         self.table.cellClicked.connect(self.open_crop_from_table)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_crop_context_menu)
         right_layout.addWidget(self.table)
+
+        btn_next_review = QPushButton(tr("btn_next_review"))
+        btn_next_review.setToolTip(tr("tip_next_review"))
+        btn_next_review.setShortcut("F8")
+        btn_next_review.clicked.connect(self.jump_to_next_review)
+        right_layout.addWidget(btn_next_review)
         
         self.lbl_score = QLabel(tr("lbl_total"))
         right_layout.addWidget(self.lbl_score)
@@ -3077,19 +3293,144 @@ class OMRSoftware(QMainWindow):
             self.btn_mark_align.setChecked(False)
             self.view.set_marking_mode(is_checked, MARK_TYPE_OPTION)
 
+    def _on_first_key_changed(self, state):
+        self.first_page_key = state == Qt.Checked
+        self._settings.setValue("first_page_key", self.first_page_key)
+        if self.first_page_key and self.results.get(0):
+            self.answer_key = self._answer_key_from_result(self.results[0])
+        elif not self.first_page_key:
+            self.answer_key = {}
+        self.update_result_table()
+
+    def _answer_key_from_result(self, page_result):
+        """Return only syntactically valid option answers from a key page."""
+
+        answer_key = {}
+        for question, value in page_result.get("options", {}).items():
+            compact = "".join(str(value).split()).upper()
+            allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[
+                : self._option_count_for_question(question)
+            ]
+            if compact and all(character in allowed for character in compact):
+                answer_key[question] = "".join(dict.fromkeys(compact))
+            else:
+                answer_key[question] = ""
+        return answer_key
+
+    def _reset_session_cache(self):
+        try:
+            self._session_temp.cleanup()
+        except Exception:
+            pass
+        self._session_temp = tempfile.TemporaryDirectory(prefix="checkmate_")
+        self.debug_dir = os.path.join(self._session_temp.name, "debug_crops")
+
+    def _clear_result_table(self):
+        if not hasattr(self, "table"):
+            return
+        self.table.blockSignals(True)
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        self.table.blockSignals(False)
+        if hasattr(self, "lbl_score"):
+            self.lbl_score.setText(tr("lbl_total"))
+        if hasattr(self, "lbl_answer_status"):
+            self.lbl_answer_status.setText("")
+
+    def _reset_document_state(self):
+        """Clear all state that must never leak between PDFs."""
+
+        self.results = {}
+        self.answer_key = {}
+        self.page_offsets = {}
+        self.debug_records = []
+        self._last_detection = {}
+        self._review_cursor = None
+        self.student_absence = {}
+        self.extra_students = []
+        self.student_order = []
+        self.current_page = 0
+        self._reset_align_templates()
+        self._reset_session_cache()
+        self._clear_result_table()
+        if hasattr(self, "lbl_student_info"):
+            self.lbl_student_info.setText("")
+        if hasattr(self, "lbl_correction"):
+            self.lbl_correction.setText("")
+
+    def _open_pdf_path(self, file_path, *, load_preview=True):
+        """Open a PDF transactionally, preserving the current file on failure."""
+
+        new_document = None
+        try:
+            new_document = fitz.open(file_path)
+            if len(new_document) == 0:
+                raise ValueError("The PDF has no pages.")
+        except Exception:
+            if new_document is not None:
+                try:
+                    new_document.close()
+                except Exception:
+                    pass
+            raise
+
+        old_document = self.pdf_document
+        if self.current_pixmap_item is not None:
+            try:
+                self.scene.removeItem(self.current_pixmap_item)
+            except Exception:
+                pass
+            self.current_pixmap_item = None
+
+        self._reset_document_state()
+        self.pdf_path = os.path.abspath(file_path)
+        self.pdf_document = new_document
+        try:
+            if old_document is not None:
+                old_document.close()
+        except Exception:
+            pass
+
+        if load_preview:
+            self.load_page(0, apply_corrections=True)
+        else:
+            self.lbl_page.setText(
+                tr("lbl_page", current=1, total=len(self.pdf_document))
+            )
+        self.statusBar().showMessage(
+            f"{os.path.basename(self.pdf_path)}  ·  {len(self.pdf_document)} pages",
+            8000,
+        )
+
     def import_pdf(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         if fname:
             try:
-                self.pdf_path = fname
-                self.pdf_document = fitz.open(fname)
-                self.current_page = 0
-                # Reset all alignment references when loading new PDF
-                self._reset_align_templates()
-                # Load first page with corrections to initialize alignment reference
-                self.load_page(0, apply_corrections=True)
+                self._open_pdf_path(fname)
             except Exception as e:
                 QMessageBox.critical(self, "Error", str(e))
+
+    def dragEnterEvent(self, event):
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if any(url.toLocalFile().lower().endswith(".pdf") for url in urls):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        pdf_paths = [
+            url.toLocalFile()
+            for url in event.mimeData().urls()
+            if url.toLocalFile().lower().endswith(".pdf")
+        ]
+        if not pdf_paths:
+            event.ignore()
+            return
+        try:
+            self._open_pdf_path(pdf_paths[0])
+            event.acceptProposedAction()
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", str(exc))
 
     def _get_pdf_prefix(self):
         if hasattr(self, 'pdf_path') and self.pdf_path:
@@ -3107,7 +3448,7 @@ class OMRSoftware(QMainWindow):
 
     def _save_crop_image(self, image, page_idx, label, kind):
         """Save a crop image and return the file path."""
-        debug_dir = "debug_crops"
+        debug_dir = self.debug_dir
         os.makedirs(debug_dir, exist_ok=True)
         safe_label = self._safe_crop_label(label)
         filename = f"page_{page_idx+1}_{kind}_{safe_label}.png"
@@ -3560,34 +3901,26 @@ class OMRSoftware(QMainWindow):
         self.current_page = p_idx
         self.lbl_page.setText(tr("lbl_page", current=p_idx+1, total=len(self.pdf_document)))
         
-        # Render PDF
-        page = self.pdf_document[p_idx]
-        mat = fitz.Matrix(2, 2)
-        pix = page.get_pixmap(matrix=mat)
-        
-        # Convert to numpy array for processing
-        img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        img_np = np.array(img_pil)
-        
         correction_info = []
-        
-        # Apply corrections if enabled
         if apply_corrections:
-            # Apply auto-deskew if enabled
-            if hasattr(self, 'check_auto_deskew') and self.check_auto_deskew.isChecked():
-                img_np, skew_angle = deskew_image(img_np)
-                if skew_angle != 0.0:
-                    correction_info.append(f"Deskew: {skew_angle:.2f}°")
-            
-            # Apply auto-align (shift) if enabled and alignment mark(s) exist
-            if hasattr(self, 'check_auto_align') and self.check_auto_align.isChecked():
-                if hasattr(self, 'view') and len(self.view.align_marks) > 0:
-                    # Page 0 initializes the template, other pages get aligned
-                    img_np, (dx, dy), confidence = self.align_image(img_np, p_idx)
-                    if p_idx == 0:
-                        correction_info.append("Alignment reference set")
-                    elif dx != 0.0 or dy != 0.0:
-                        correction_info.append(f"Shift correction: dx={dx:.1f}, dy={dy:.1f}")
+            # Preview and recognition intentionally share one correction
+            # pipeline so crop previews show the pixels that were classified.
+            img_np, correction = self._prepare_page_for_recognition(p_idx)
+            skew_angle = float(correction.get("deskew_angle", 0.0))
+            if skew_angle != 0.0:
+                correction_info.append(f"Deskew: {skew_angle:.2f}°")
+            if self.check_auto_align.isChecked():
+                dx, dy = correction.get("alignment_shift", [0.0, 0.0])
+                confidence = float(correction.get("alignment_confidence", 0.0))
+                if p_idx == 0:
+                    correction_info.append("Alignment reference set")
+                elif dx != 0.0 or dy != 0.0:
+                    correction_info.append(
+                        f"Alignment: dx={dx:.1f}, dy={dy:.1f}, "
+                        f"confidence={confidence:.0%}"
+                    )
+        else:
+            img_np = self._render_raw_page(p_idx)
         
         # Convert back to QImage
         h, w = img_np.shape[:2]
@@ -3713,12 +4046,43 @@ class OMRSoftware(QMainWindow):
 
     def export_template(self):
         data = self.view.get_all_marks_data()
+        data["schema_version"] = 2
+        data["app_version"] = APP_VERSION
+        data["render_scale"] = 2.0
+        # Store marks relative to the page image, not its manually dragged
+        # scene position.  This makes a saved template portable to offset 0.
+        if self.current_page == 0 and self.current_pixmap_item is not None:
+            offset_x, offset_y = self.current_pixmap_item.get_offset()
+            self.page_offsets[0] = (offset_x, offset_y)
+        else:
+            offset_x, offset_y = self._get_page_offset(0)
+        for key in ("text_marks", "option_marks", "align_marks"):
+            for mark in data.get(key, []):
+                mark["x"] = float(mark.get("x", 0.0)) - float(offset_x)
+                mark["y"] = float(mark.get("y", 0.0)) - float(offset_y)
+        if self.pdf_document and len(self.pdf_document):
+            page_rect = self.pdf_document[0].rect
+            data["reference_page"] = {
+                "width": float(page_rect.width) * 2.0,
+                "height": float(page_rect.height) * 2.0,
+            }
+        elif self.current_pixmap_item is not None:
+            pixmap = self.current_pixmap_item.pixmap()
+            data["reference_page"] = {
+                "width": pixmap.width(),
+                "height": pixmap.height(),
+            }
         fname, _ = QFileDialog.getSaveFileName(self, "Save Template", "", "JSON (*.json)")
         if fname:
-            with open(fname, 'w') as f:
-                json.dump(data, f, indent=2)
+            if not fname.lower().endswith(".json"):
+                fname += ".json"
+            try:
+                with open(fname, "w", encoding="utf-8") as file:
+                    json.dump(data, file, ensure_ascii=False, indent=2)
+            except Exception as exc:
+                QMessageBox.critical(self, "Template Error", str(exc))
 
-    def import_template(self):
+    def _import_template_legacy(self):
         fname, _ = QFileDialog.getOpenFileName(self, "Load Template", "", "JSON (*.json)")
         if fname:
             with open(fname, 'r') as f:
@@ -3754,7 +4118,178 @@ class OMRSoftware(QMainWindow):
                 self.scene.addItem(item)
                 self.view.align_counter = max(self.view.align_counter, ad.get('question', 1) + 1)
 
-    def run_recognition_all(self):
+    def import_template(self):
+        fname, _ = QFileDialog.getOpenFileName(
+            self, "Load Template", "", "JSON (*.json)"
+        )
+        if not fname:
+            return
+        try:
+            with open(fname, "r", encoding="utf-8-sig") as file:
+                data = json.load(file)
+            if not isinstance(data, dict):
+                raise ValueError("Template root must be a JSON object.")
+            for key in ("text_marks", "option_marks"):
+                if key in data and not isinstance(data[key], list):
+                    raise ValueError(f"Template field '{key}' must be a list.")
+            self._load_template_data(data)
+            self.results = {}
+            self.answer_key = {}
+            self.debug_records = []
+            self._review_cursor = None
+            self._clear_result_table()
+            self.statusBar().showMessage(
+                f"Template loaded: {os.path.basename(fname)}", 6000
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Template Error", str(exc))
+
+    def _render_raw_page(self, page_idx):
+        page = self.pdf_document[page_idx]
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+        return np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n
+        )[:, :, :3].copy()
+
+    def _prepare_page_for_recognition(self, page_idx):
+        """Render and correct one page using a consistent pipeline."""
+
+        image = self._render_raw_page(page_idx)
+        metadata = {
+            "deskew_angle": 0.0,
+            "alignment_shift": [0.0, 0.0],
+            "alignment_confidence": 0.0,
+        }
+        if self.check_auto_deskew.isChecked():
+            image, angle = deskew_image(image)
+            metadata["deskew_angle"] = float(angle)
+
+        if self.check_auto_align.isChecked():
+            # Selected-page recognition must still anchor itself to page 0;
+            # otherwise the first selected student page becomes the reference.
+            has_template_reference = bool(getattr(self, "align_templates", []))
+            has_bounds_reference = self.align_reference_gray is not None
+            if page_idx != 0 and not (has_template_reference or has_bounds_reference):
+                reference = self._render_raw_page(0)
+                if self.check_auto_deskew.isChecked():
+                    reference, _ = deskew_image(reference)
+                self.align_image(reference, 0)
+
+            image, (dx, dy), confidence = self.align_image(image, page_idx)
+            # Always use the returned image.  A pure rotation can legitimately
+            # have dx=dy=0 and was previously discarded in interactive flows.
+            metadata["alignment_shift"] = [float(dx), float(dy)]
+            metadata["alignment_confidence"] = float(confidence)
+        return image, metadata
+
+    def _recognize_page(self, page_idx, preserve_overrides=True):
+        """Recognize one page for all interactive and batch workflows."""
+
+        image, correction = self._prepare_page_for_recognition(page_idx)
+        height, width = image.shape[:2]
+        off_x, off_y = self._get_page_offset(page_idx)
+        existing = self.results.get(page_idx, {}) if preserve_overrides else {}
+        manual_overrides = dict(existing.get("manual_overrides", {}))
+        debug_enabled = bool(self.check_save_debug.isChecked())
+
+        page_result = {
+            "options": {},
+            "raw_options": {},
+            "manual_overrides": manual_overrides,
+            "text": {},
+            "option_crops": {},
+            "text_crops": {},
+            "option_boxes": {},
+            "text_boxes": {},
+            "confidence": {},
+            "review": {},
+            "reasons": {},
+            "alignment": correction,
+        }
+
+        for mark in self.view.option_marks:
+            rect = mark.sceneBoundingRect()
+            left = max(0, int(round(rect.x() - off_x)))
+            top = max(0, int(round(rect.y() - off_y)))
+            right = min(width, int(round(rect.x() + rect.width() - off_x)))
+            bottom = min(height, int(round(rect.y() + rect.height() - off_y)))
+            question = mark.question_num
+            page_result["option_boxes"][question] = [left, top, right, bottom]
+
+            if right <= left or bottom <= top:
+                detected = "[Out of bounds]"
+                details = {
+                    "confidence": 0.0,
+                    "needs_review": True,
+                    "reason": "out_of_bounds",
+                }
+            else:
+                crop_array = image[top:bottom, left:right]
+                correct_answer = (
+                    self.answer_key.get(question, "")
+                    or self.answer_key.get(str(question), "")
+                )
+                detected = self.detect_filled_option(
+                    crop_array,
+                    mark.options_count,
+                    save_debug=debug_enabled,
+                    context={
+                        "page": page_idx + 1,
+                        "question": question,
+                        "label": f"Q{question}",
+                        "correct_answer": correct_answer,
+                    },
+                )
+                details = dict(self._last_detection)
+
+            page_result["raw_options"][question] = detected
+            page_result["confidence"][question] = float(details.get("confidence", 0.0))
+            page_result["review"][question] = bool(
+                details.get("needs_review", True)
+            )
+            page_result["reasons"][question] = str(
+                details.get("reason", "unknown")
+            )
+
+        page_result["options"] = dict(page_result["raw_options"])
+        for question, value in manual_overrides.items():
+            page_result["options"][question] = value
+            page_result["confidence"][question] = 1.0
+            page_result["review"][question] = False
+            page_result["reasons"][question] = "manual"
+
+        existing_text = dict(existing.get("text", {}))
+        for mark in self.view.text_marks:
+            rect = mark.sceneBoundingRect()
+            left = max(0, int(round(rect.x() - off_x)))
+            top = max(0, int(round(rect.y() - off_y)))
+            right = min(width, int(round(rect.x() + rect.width() - off_x)))
+            bottom = min(height, int(round(rect.y() + rect.height() - off_y)))
+            key = mark.label if mark.label else f"Field {mark.question_num}"
+            page_result["text_boxes"][key] = [left, top, right, bottom]
+
+            if not self.check_recognize_text.isChecked():
+                text = existing_text.get(key, "")
+            elif right <= left or bottom <= top:
+                text = "[Out of bounds]"
+            else:
+                crop_image = Image.fromarray(image[top:bottom, left:right])
+                try:
+                    text = self.get_ocr_result(
+                        crop_image, save_debug=debug_enabled
+                    )
+                except Exception as exc:
+                    # A first-run model download or OCR engine problem must not
+                    # discard the already-recognized OMR answers on this page.
+                    print(f"OCR failed for {key}: {exc}")
+                    text = "[OCR unavailable]"
+            page_result["text"][key] = text
+
+        for key, value in existing_text.items():
+            page_result["text"].setdefault(key, value)
+        return page_result
+
+    def _run_recognition_all_legacy(self):
         if not self.pdf_document: 
             QMessageBox.warning(self, "Warning", tr("msg_no_pdf"))
             return
@@ -3901,11 +4436,82 @@ class OMRSoftware(QMainWindow):
 
         # Build Answer Key if needed
         if self.first_page_key and 0 in self.results:
-            self.answer_key = self.results[0]["options"]
+            self.answer_key = self._answer_key_from_result(self.results[0])
             # Refresh to show scores
             self.update_result_table()
 
-    def run_recognition_selected(self):
+    def run_recognition_all(self):
+        if not self.pdf_document:
+            QMessageBox.warning(self, "Warning", tr("msg_no_pdf"))
+            return
+        if not self.view.option_marks and not self.view.text_marks:
+            QMessageBox.warning(self, "Warning", tr("msg_no_marks"))
+            return
+
+        if self.current_pixmap_item:
+            self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
+        manual_answer_key = (
+            dict(self.answer_key) if not self.first_page_key else {}
+        )
+        self.results = {}
+        self.answer_key = manual_answer_key
+        self.debug_records = []
+        self._review_cursor = None
+        self._reset_align_templates()
+
+        total = len(self.pdf_document)
+        progress = QtWidgets.QProgressDialog(
+            "Recognizing...", "Cancel", 0, total, self
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        errors = []
+        processed = 0
+        cancelled = False
+        for page_idx in range(total):
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                cancelled = True
+                break
+            progress.setValue(page_idx)
+            progress.setLabelText(
+                f"Recognizing page {page_idx + 1} of {total}..."
+            )
+            try:
+                self.results[page_idx] = self._recognize_page(
+                    page_idx, preserve_overrides=False
+                )
+                processed += 1
+                if self.first_page_key and page_idx == 0:
+                    self.answer_key = self._answer_key_from_result(
+                        self.results[0]
+                    )
+            except Exception as exc:
+                errors.append((page_idx, str(exc)))
+
+        progress.setValue(processed if cancelled else total)
+        progress.close()
+        self.update_result_table()
+
+        total_options = sum(
+            len(result.get("options", {})) for result in self.results.values()
+        )
+        summary = tr(
+            "msg_recognition_complete",
+            pages=processed,
+            options=total_options,
+        )
+        if cancelled:
+            summary += "\n\nCancelled; completed results were kept."
+        if errors:
+            summary += f"\n\n{len(errors)} page(s) failed:"
+            for page_idx, error in errors[:3]:
+                summary += f"\n• Page {page_idx + 1}: {error[:100]}"
+        QMessageBox.information(self, tr("msg_recognition_title"), summary)
+
+    def _run_recognition_selected_legacy(self):
         """Re-recognize specific pages (current, range, or all)."""
         if not self.pdf_document:
             QMessageBox.warning(self, "Warning", tr("msg_no_pdf"))
@@ -4079,8 +4685,115 @@ class OMRSoftware(QMainWindow):
         self.update_result_table()
 
         if self.first_page_key and 0 in self.results:
-            self.answer_key = self.results[0]["options"]
+            self.answer_key = self._answer_key_from_result(self.results[0])
             self.update_result_table()
+
+    def run_recognition_selected(self):
+        """Re-recognize selected pages through the shared page pipeline."""
+
+        if not self.pdf_document:
+            QMessageBox.warning(self, "Warning", tr("msg_no_pdf"))
+            return
+        if not self.view.option_marks and not self.view.text_marks:
+            QMessageBox.warning(self, "Warning", tr("msg_no_marks"))
+            return
+
+        total_pages = len(self.pdf_document)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(tr("dlg_recognize_title"))
+        dialog.resize(400, 200)
+        dialog_layout = QVBoxLayout(dialog)
+        dialog_layout.addWidget(QLabel(tr("dlg_recognize_prompt")))
+
+        from PyQt5.QtWidgets import QLineEdit, QRadioButton
+
+        current_radio = QRadioButton(
+            tr("dlg_recognize_current") + f" ({self.current_page + 1})"
+        )
+        current_radio.setChecked(True)
+        all_radio = QRadioButton(tr("dlg_recognize_all_pages"))
+        range_radio = QRadioButton(tr("dlg_recognize_range"))
+        range_edit = QLineEdit()
+        range_edit.setPlaceholderText("e.g. 1-3, 5, 8")
+        range_edit.setEnabled(False)
+        range_radio.toggled.connect(range_edit.setEnabled)
+        for widget in (current_radio, all_radio, range_radio, range_edit):
+            dialog_layout.addWidget(widget)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        dialog_layout.addWidget(buttons)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        if current_radio.isChecked():
+            pages_to_process = [self.current_page]
+        elif all_radio.isChecked():
+            pages_to_process = list(range(total_pages))
+        else:
+            pages_to_process = self._parse_page_range(
+                range_edit.text().strip(), total_pages
+            )
+        if not pages_to_process:
+            QMessageBox.warning(self, "Warning", "Invalid page range.")
+            return
+
+        if self.current_pixmap_item:
+            self.page_offsets[self.current_page] = self.current_pixmap_item.get_offset()
+        self._reset_align_templates()
+        self.debug_records = []
+        self._review_cursor = None
+
+        progress = QtWidgets.QProgressDialog(
+            "Recognizing...", "Cancel", 0, len(pages_to_process), self
+        )
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.show()
+
+        errors = []
+        processed = 0
+        cancelled = False
+        for index, page_idx in enumerate(pages_to_process):
+            QtWidgets.QApplication.processEvents()
+            if progress.wasCanceled():
+                cancelled = True
+                break
+            progress.setValue(index)
+            progress.setLabelText(f"Re-recognizing page {page_idx + 1}...")
+            try:
+                self.results[page_idx] = self._recognize_page(
+                    page_idx, preserve_overrides=True
+                )
+                processed += 1
+                if self.first_page_key and page_idx == 0:
+                    self.answer_key = self._answer_key_from_result(
+                        self.results[0]
+                    )
+            except Exception as exc:
+                errors.append((page_idx, str(exc)))
+
+        progress.setValue(processed if cancelled else len(pages_to_process))
+        progress.close()
+        self.update_result_table()
+
+        total_options = sum(
+            len(self.results.get(page, {}).get("options", {}))
+            for page in pages_to_process
+        )
+        summary = tr(
+            "msg_recognition_complete",
+            pages=processed,
+            options=total_options,
+        )
+        if cancelled:
+            summary += "\n\nCancelled; completed results were kept."
+        if errors:
+            summary += f"\n\n{len(errors)} page(s) failed."
+        QMessageBox.information(self, tr("msg_recognition_title"), summary)
 
     def _parse_page_range(self, text, total_pages):
         """Parse page range string like '1-3, 5, 8' into list of 0-based page indices."""
@@ -4109,7 +4822,7 @@ class OMRSoftware(QMainWindow):
                     continue
         return sorted(pages)
 
-    def update_result_table(self):
+    def _update_result_table_legacy(self):
         # Display results for CURRENT page
         if self.current_page not in getattr(self, 'results', {}):
             return
@@ -4194,7 +4907,326 @@ class OMRSoftware(QMainWindow):
 
         self.table.blockSignals(False)
 
+    def update_result_table(self):
+        """Render the current page with confidence and review information."""
+
+        if self.current_page not in self.results:
+            self._clear_result_table()
+            return
+
+        self.table.blockSignals(True)
+        page_result = self.results[self.current_page]
+        options = page_result.get("options", {})
+        confidence = page_result.get("confidence", {})
+        review = page_result.get("review", {})
+        reasons = page_result.get("reasons", {})
+        option_boxes = page_result.get("option_boxes", {})
+        option_crops = page_result.get("option_crops", {})
+
+        def question_sort_key(question):
+            text = str(question)
+            return (0, int(text)) if text.isdigit() else (1, text)
+
+        questions = sorted(options.keys(), key=question_sort_key)
+        self.table.clearContents()
+        self.table.setRowCount(len(questions))
+        total_score = 0
+        empty_questions = []
+        multiple_questions = []
+        review_questions = []
+
+        for row, question in enumerate(questions):
+            detected = str(options.get(question, ""))
+            correct = (
+                self.answer_key.get(question, "")
+                or self.answer_key.get(str(question), "")
+            )
+            detected_clean = "".join(detected.split()).upper()
+            correct_clean = "".join(str(correct).split()).upper()
+            is_correct = bool(correct_clean and detected_clean == correct_clean)
+            points = 1 if is_correct else 0
+            total_score += points
+
+            question_item = QTableWidgetItem(f"Q{question}")
+            question_item.setData(Qt.UserRole, question)
+            question_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 0, question_item)
+            self.table.setItem(row, 1, QTableWidgetItem(detected))
+            self.table.setItem(row, 2, QTableWidgetItem(str(correct)))
+            points_item = QTableWidgetItem(str(points))
+            points_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            self.table.setItem(row, 3, points_item)
+
+            value_confidence = float(confidence.get(question, 0.0))
+            confidence_item = QTableWidgetItem(f"{value_confidence:.0%}")
+            confidence_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            confidence_item.setToolTip(str(reasons.get(question, "")))
+            self.table.setItem(row, 4, confidence_item)
+
+            crop_reference = {
+                "page": self.current_page,
+                "question": question,
+                "box": option_boxes.get(question),
+                "path": option_crops.get(question, ""),
+            }
+            box = crop_reference["box"]
+            try:
+                has_valid_box = (
+                    isinstance(box, (list, tuple))
+                    and len(box) == 4
+                    and float(box[2]) > float(box[0])
+                    and float(box[3]) > float(box[1])
+                )
+            except (TypeError, ValueError):
+                has_valid_box = False
+            has_crop = bool(
+                has_valid_box
+                or (
+                    crop_reference["path"]
+                    and os.path.isfile(crop_reference["path"])
+                )
+            )
+            crop_item = QTableWidgetItem("View" if has_crop else "-")
+            crop_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+            if has_crop:
+                crop_item.setForeground(QColor("#007bff"))
+                crop_item.setData(Qt.UserRole, crop_reference)
+            self.table.setItem(row, 5, crop_item)
+
+            is_flagged = bool(review.get(question, False))
+            if detected_clean == "":
+                empty_questions.append(f"Q{question}")
+                is_flagged = True
+                self.table.item(row, 1).setBackground(QColor("#fff3cd"))
+            elif detected.startswith("["):
+                is_flagged = True
+                self.table.item(row, 1).setBackground(QColor("#f8d7da"))
+            elif len(detected_clean) > 1:
+                multiple_questions.append(f"Q{question}")
+                is_flagged = True
+                self.table.item(row, 1).setBackground(QColor("#ffe5b4"))
+            elif correct_clean:
+                self.table.item(row, 1).setBackground(
+                    QColor("#d4edda" if is_correct else "#f8d7da")
+                )
+            if is_flagged:
+                review_questions.append(f"Q{question}")
+                confidence_item.setBackground(QColor("#fff3cd"))
+
+        self.lbl_score.setText(tr("lbl_score", score=total_score))
+        status_parts = []
+        if empty_questions:
+            status_parts.append(
+                tr("lbl_answer_status_empty", questions=", ".join(empty_questions))
+            )
+        if multiple_questions:
+            status_parts.append(
+                tr(
+                    "lbl_answer_status_multi",
+                    questions=", ".join(multiple_questions),
+                )
+            )
+        low_only = [
+            question
+            for question in review_questions
+            if question not in empty_questions and question not in multiple_questions
+        ]
+        if low_only:
+            status_parts.append(
+                tr("lbl_answer_status_review", questions=", ".join(low_only))
+            )
+        if status_parts:
+            self.lbl_answer_status.setText("  |  ".join(status_parts))
+            self.lbl_answer_status.setStyleSheet(
+                "color: #e65100; font-size: 12px; font-weight: bold; padding: 2px;"
+            )
+        elif questions:
+            self.lbl_answer_status.setText(tr("lbl_answer_status_ok"))
+            self.lbl_answer_status.setStyleSheet(
+                "color: #2e7d32; font-size: 12px; padding: 2px;"
+            )
+        else:
+            self.lbl_answer_status.setText("")
+        self.table.blockSignals(False)
+
+    def _option_count_for_question(self, question):
+        for mark in self.view.option_marks:
+            if str(mark.question_num) == str(question):
+                return int(mark.options_count)
+        return 4
+
+    def _normalize_option_answer(self, value, question):
+        allowed = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[: self._option_count_for_question(question)]
+        seen = set()
+        normalized = []
+        for character in str(value).upper():
+            if character in allowed and character not in seen:
+                normalized.append(character)
+                seen.add(character)
+        return "".join(normalized)
+
     def on_table_edit(self, row, col):
+        if col not in (1, 2):
+            return
+        question_item = self.table.item(row, 0)
+        value_item = self.table.item(row, col)
+        if not question_item or not value_item:
+            return
+        question = question_item.data(Qt.UserRole)
+        if question is None:
+            return
+        normalized = self._normalize_option_answer(value_item.text(), question)
+
+        if col == 1 and self.current_page in self.results:
+            page_result = self.results[self.current_page]
+            page_result.setdefault("manual_overrides", {})[question] = normalized
+            page_result.setdefault("options", {})[question] = normalized
+            page_result.setdefault("confidence", {})[question] = 1.0
+            page_result.setdefault("review", {})[question] = False
+            page_result.setdefault("reasons", {})[question] = "manual"
+            if self.first_page_key and self.current_page == 0:
+                self.answer_key[question] = normalized
+        elif col == 2:
+            self.answer_key[question] = normalized
+        self.update_result_table()
+
+    def _crop_pixmap_from_reference(self, reference):
+        if not reference:
+            return QPixmap()
+        path = reference.get("path", "") if isinstance(reference, dict) else reference
+        if path and os.path.exists(path):
+            return QPixmap(path)
+        if not isinstance(reference, dict):
+            return QPixmap()
+        box = reference.get("box")
+        if (
+            not box
+            or reference.get("page") != self.current_page
+            or self.current_pixmap_item is None
+        ):
+            return QPixmap()
+        left, top, right, bottom = [int(value) for value in box]
+        if right <= left or bottom <= top:
+            return QPixmap()
+        return self.current_pixmap_item.pixmap().copy(
+            left, top, right - left, bottom - top
+        )
+
+    def _save_crop_reference(self, reference):
+        pixmap = self._crop_pixmap_from_reference(reference)
+        if pixmap.isNull():
+            return
+        question = reference.get("question", "answer")
+        default_name = f"page_{self.current_page + 1}_Q{question}.png"
+        file_name, _ = QFileDialog.getSaveFileName(
+            self, "Save Crop Image", default_name, "PNG Image (*.png)"
+        )
+        if file_name:
+            pixmap.save(file_name, "PNG")
+
+    def open_crop_from_table(self, row, col):
+        if col != 5:
+            return
+        item = self.table.item(row, col)
+        reference = item.data(Qt.UserRole) if item else None
+        pixmap = self._crop_pixmap_from_reference(reference)
+        if pixmap.isNull():
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(
+            tr(
+                "crop_preview_title",
+                page=self.current_page + 1,
+                question=reference.get("question", ""),
+            )
+        )
+        layout = QVBoxLayout(dialog)
+        image_label = QLabel()
+        image_label.setAlignment(Qt.AlignCenter)
+        scale = min(6.0, max(1.0, 520.0 / max(1, pixmap.width())))
+        image_label.setPixmap(
+            pixmap.scaled(
+                max(1, int(pixmap.width() * scale)),
+                max(1, int(pixmap.height() * scale)),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        )
+        layout.addWidget(image_label)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Save | QDialogButtonBox.Close
+        )
+        buttons.button(QDialogButtonBox.Save).clicked.connect(
+            lambda: self._save_crop_reference(reference)
+        )
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec_()
+
+    def open_crop_context_menu(self, pos):
+        index = self.table.indexAt(pos)
+        if not index.isValid() or index.column() != 5:
+            return
+        item = self.table.item(index.row(), index.column())
+        reference = item.data(Qt.UserRole) if item else None
+        if self._crop_pixmap_from_reference(reference).isNull():
+            return
+        menu = QMenu(self)
+        save_action = QAction("Save Crop As...", self)
+        save_action.triggered.connect(lambda: self._save_crop_reference(reference))
+        menu.addAction(save_action)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def jump_to_next_review(self):
+        review_items = []
+        for page_idx, page_result in sorted(self.results.items()):
+            options = page_result.get("options", {})
+            review = page_result.get("review", {})
+            for question in sorted(
+                options,
+                key=lambda value: (
+                    0,
+                    int(value),
+                )
+                if str(value).isdigit()
+                else (1, str(value)),
+            ):
+                answer = str(options.get(question, "")).strip()
+                if (
+                    review.get(question, False)
+                    or not answer
+                    or answer.startswith("[")
+                    or len(answer) > 1
+                ):
+                    review_items.append((page_idx, question))
+        if not review_items:
+            QMessageBox.information(self, tr("btn_next_review"), tr("msg_no_review"))
+            return
+
+        if self._review_cursor in review_items:
+            index = (review_items.index(self._review_cursor) + 1) % len(review_items)
+        else:
+            index = next(
+                (
+                    idx
+                    for idx, item in enumerate(review_items)
+                    if item[0] >= self.current_page
+                ),
+                0,
+            )
+        self._review_cursor = review_items[index]
+        page_idx, question = self._review_cursor
+        if page_idx != self.current_page:
+            self.load_page(page_idx, apply_corrections=True)
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item and str(item.data(Qt.UserRole)) == str(question):
+                self.table.selectRow(row)
+                self.table.scrollToItem(item)
+                break
+
+    def _on_table_edit_legacy(self, row, col):
         if col == 1:
             item_header = self.table.item(row, 0)
             if not item_header:
@@ -4223,7 +5255,7 @@ class OMRSoftware(QMainWindow):
                 except:
                     pass
 
-    def open_crop_from_table(self, row, col):
+    def _open_crop_from_table_legacy(self, row, col):
         if col != 4:
             return
         item = self.table.item(row, col)
@@ -4233,7 +5265,7 @@ class OMRSoftware(QMainWindow):
         if path and os.path.exists(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
-    def open_crop_context_menu(self, pos):
+    def _open_crop_context_menu_legacy(self, pos):
         index = self.table.indexAt(pos)
         if not index.isValid() or index.column() != 4:
             return
@@ -4264,7 +5296,8 @@ class OMRSoftware(QMainWindow):
 
     def export_excel(self):
         """Export Excel to a user-chosen file."""
-        if not hasattr(self, 'results'):
+        if not self.results:
+            QMessageBox.warning(self, "Error", tr("msg_no_results"))
             return
         prefix = self._get_pdf_prefix()
         timestamp = self._get_timestamp()
@@ -4277,7 +5310,7 @@ class OMRSoftware(QMainWindow):
 
     def export_results_bundle(self):
         """Export Excel (and optionally images) to a user-chosen folder."""
-        if not hasattr(self, 'results'):
+        if not self.results:
             QMessageBox.warning(self, "Error", tr("msg_no_results"))
             return
         if not hasattr(self, 'pdf_path') or not self.pdf_path:
@@ -4521,7 +5554,7 @@ class OMRSoftware(QMainWindow):
     def export_debug_pack(self):
         """Export debug images and scoring records into a folder for easy sharing."""
         has_records = bool(getattr(self, "debug_records", []))
-        debug_dir = "debug_crops"
+        debug_dir = self.debug_dir
         has_debug_images = os.path.isdir(debug_dir) and any(os.scandir(debug_dir))
 
         if not has_records and not has_debug_images:
@@ -4633,7 +5666,7 @@ class OMRSoftware(QMainWindow):
         
         # Load template once
         try:
-            with open(template_file, 'r') as f:
+            with open(template_file, "r", encoding="utf-8-sig") as f:
                 template_data = json.load(f)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load template:\n{e}")
@@ -4701,6 +5734,9 @@ class OMRSoftware(QMainWindow):
         
         success_count = 0
         error_files = []
+        shared_answer_key = (
+            dict(self.answer_key) if not self.first_page_key else {}
+        )
         
         for idx, pdf_path in enumerate(pdf_files):
             QtWidgets.QApplication.processEvents()
@@ -4711,25 +5747,21 @@ class OMRSoftware(QMainWindow):
             progress.setLabelText(f"Processing: {os.path.basename(pdf_path)}")
             
             try:
-                # Load template
+                # Open the target first so template coordinates can be scaled to
+                # this document instead of the previously displayed document.
+                self._open_pdf_path(pdf_path, load_preview=False)
                 self._load_template_data(template_data)
-                
-                # Load PDF
-                self.pdf_path = pdf_path
-                self.pdf_document = fitz.open(pdf_path)
-                self.current_page = 0
-                self.align_reference_gray = None
-                self.load_page(0)
-                
-                # Reset alignment template for new PDF
-                self._reset_align_templates()
+                if not self.first_page_key:
+                    self.answer_key = dict(shared_answer_key)
                 
                 # Run recognition
                 self._run_recognition_internal()
 
                 # Use first page as answer key for this PDF (per-file)
                 if self.first_page_key and 0 in self.results:
-                    self.answer_key = self.results[0]["options"]
+                    self.answer_key = self._answer_key_from_result(
+                        self.results[0]
+                    )
                 
                 # Export results to same folder as PDF
                 output_folder = os.path.dirname(pdf_path)
@@ -4775,6 +5807,9 @@ class OMRSoftware(QMainWindow):
         
         success_count = 0
         error_files = []
+        shared_answer_key = (
+            dict(self.answer_key) if not self.first_page_key else {}
+        )
         
         for idx, (pdf_path, template_path) in enumerate(matched_pairs):
             QtWidgets.QApplication.processEvents()
@@ -4786,26 +5821,24 @@ class OMRSoftware(QMainWindow):
             
             try:
                 # Load template for this PDF
-                with open(template_path, 'r') as f:
+                with open(template_path, "r", encoding="utf-8-sig") as f:
                     template_data = json.load(f)
+
+                # Open before loading marks so reference dimensions are compared
+                # with the correct PDF in unattended batch mode.
+                self._open_pdf_path(pdf_path, load_preview=False)
                 self._load_template_data(template_data)
-                
-                # Load PDF
-                self.pdf_path = pdf_path
-                self.pdf_document = fitz.open(pdf_path)
-                self.current_page = 0
-                self.align_reference_gray = None
-                self.load_page(0)
-                
-                # Reset alignment template for new PDF
-                self._reset_align_templates()
+                if not self.first_page_key:
+                    self.answer_key = dict(shared_answer_key)
                 
                 # Run recognition
                 self._run_recognition_internal()
 
                 # Use first page as answer key for this PDF (per-file)
                 if self.first_page_key and 0 in self.results:
-                    self.answer_key = self.results[0]["options"]
+                    self.answer_key = self._answer_key_from_result(
+                        self.results[0]
+                    )
                 
                 # Export results to same folder as PDF
                 output_folder = os.path.dirname(pdf_path)
@@ -4841,39 +5874,150 @@ class OMRSoftware(QMainWindow):
         QMessageBox.information(self, "Batch Complete", msg)
     
     def _load_template_data(self, data):
-        """Internal method to load template data without file dialog."""
-        self.clear_all_marks()
-        
-        for m in data.get("text_marks", []):
-            item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_TEXT, m['question'], m['label'], view_ref=self.view)
-            item.setPos(m['x'], m['y'])
-            self.view.text_marks.append(item)
-            self.scene.addItem(item)
-            self.view.text_counter = max(self.view.text_counter, m['question'] + 1)
-            
-        for m in data.get("option_marks", []):
-            item = MarkItem(0, 0, m['width'], m['height'], MARK_TYPE_OPTION, m['question'], m['label'], m.get('options_count', 4), view_ref=self.view)
-            item.setPos(m['x'], m['y'])
-            self.view.option_marks.append(item)
-            self.scene.addItem(item)
-            self.view.option_counter = max(self.view.option_counter, m['question'] + 1)
-        
-        # Load alignment marks (supports both new list and old single format)
-        align_marks_data = data.get("align_marks", [])
-        # Backward compat: load old single "align_mark" format
+        """Validate and atomically load template data without a file dialog."""
+        if not isinstance(data, dict):
+            raise ValueError("Template root must be a JSON object.")
+
+        scale_x = 1.0
+        scale_y = 1.0
+        reference_page = data.get("reference_page", {}) or {}
+        reference_width = float(reference_page.get("width", 0) or 0)
+        reference_height = float(reference_page.get("height", 0) or 0)
+        target_width = 0.0
+        target_height = 0.0
+        if self.pdf_document and len(self.pdf_document):
+            # Pages are rendered at 2x throughout the application.  Using the
+            # PDF bounds avoids an otherwise unnecessary raster pass in batch.
+            page_rect = self.pdf_document[0].rect
+            target_width = float(page_rect.width) * 2.0
+            target_height = float(page_rect.height) * 2.0
+        elif self.current_pixmap_item is not None:
+            pixmap = self.current_pixmap_item.pixmap()
+            target_width = float(pixmap.width())
+            target_height = float(pixmap.height())
+
+        if (
+            target_width > 0
+            and target_height > 0
+            and reference_width > 0
+            and reference_height > 0
+        ):
+            scale_x = target_width / reference_width
+            scale_y = target_height / reference_height
+            aspect_stretch = scale_x / max(scale_y, 1e-9)
+            if not 0.92 <= aspect_stretch <= 1.08:
+                raise ValueError(
+                    "Template and PDF have incompatible page aspect ratios "
+                    f"(x={scale_x:.3f}, y={scale_y:.3f})."
+                )
+            if min(scale_x, scale_y) < 0.40 or max(scale_x, scale_y) > 2.50:
+                raise ValueError(
+                    "Template scale is outside the safe range for this PDF "
+                    f"(x={scale_x:.3f}, y={scale_y:.3f})."
+                )
+
+        schema_version = int(data.get("schema_version", 1) or 1)
+        target_offset_x, target_offset_y = (
+            self._get_page_offset(0) if schema_version >= 2 else (0.0, 0.0)
+        )
+
+        def scaled_mark(raw):
+            if not isinstance(raw, dict):
+                raise ValueError("Every template mark must be a JSON object.")
+            mark = dict(raw)
+            mark["x"] = (
+                float(mark.get("x", 0.0)) * scale_x + float(target_offset_x)
+            )
+            mark["y"] = (
+                float(mark.get("y", 0.0)) * scale_y + float(target_offset_y)
+            )
+            mark["width"] = float(mark.get("width", 0.0)) * scale_x
+            mark["height"] = float(mark.get("height", 0.0)) * scale_y
+            numeric_values = (
+                mark["x"],
+                mark["y"],
+                mark["width"],
+                mark["height"],
+            )
+            if not all(np.isfinite(value) for value in numeric_values):
+                raise ValueError("Template contains a non-finite coordinate.")
+            if mark["width"] < 3 or mark["height"] < 3:
+                raise ValueError("Template contains an invalid or empty mark.")
+            mark["question"] = int(mark.get("question", 0))
+            if mark["question"] < 1:
+                raise ValueError("Template question numbers must be positive.")
+            mark["label"] = str(mark.get("label", ""))
+            return mark
+
+        def mark_list(key):
+            value = data.get(key, [])
+            if value is None:
+                return []
+            if not isinstance(value, list):
+                raise ValueError(f"Template field '{key}' must be a list.")
+            return value
+
+        prepared_text = [scaled_mark(raw) for raw in mark_list("text_marks")]
+        prepared_options = [scaled_mark(raw) for raw in mark_list("option_marks")]
+        for mark in prepared_options:
+            mark["options_count"] = int(mark.get("options_count", 4))
+            if not 2 <= mark["options_count"] <= 26:
+                raise ValueError("Option counts must be between 2 and 26.")
+
+        align_marks_data = mark_list("align_marks")
         if not align_marks_data:
             old_align = data.get("align_mark")
             if old_align:
                 align_marks_data = [old_align]
-        for ad in align_marks_data:
-            item = MarkItem(0, 0, ad['width'], ad['height'], MARK_TYPE_ALIGN, 
-                           ad.get('question', self.view.align_counter), ad.get('label', ''), view_ref=self.view)
-            item.setPos(ad['x'], ad['y'])
-            self.view.align_marks.append(item)
+        prepared_align = [scaled_mark(raw) for raw in align_marks_data]
+
+        # Construct every item before touching the live scene.  Any invalid
+        # later mark therefore leaves the previous template intact.
+        text_items = [
+            MarkItem(
+                0, 0, mark["width"], mark["height"], MARK_TYPE_TEXT,
+                mark["question"], mark["label"], view_ref=self.view,
+            )
+            for mark in prepared_text
+        ]
+        option_items = [
+            MarkItem(
+                0, 0, mark["width"], mark["height"], MARK_TYPE_OPTION,
+                mark["question"], mark["label"], mark["options_count"],
+                view_ref=self.view,
+            )
+            for mark in prepared_options
+        ]
+        align_items = [
+            MarkItem(
+                0, 0, mark["width"], mark["height"], MARK_TYPE_ALIGN,
+                mark["question"], mark["label"], view_ref=self.view,
+            )
+            for mark in prepared_align
+        ]
+        for item, mark in zip(
+            text_items + option_items + align_items,
+            prepared_text + prepared_options + prepared_align,
+        ):
+            item.setPos(mark["x"], mark["y"])
+
+        self.clear_all_marks()
+        self.view.text_marks.extend(text_items)
+        self.view.option_marks.extend(option_items)
+        self.view.align_marks.extend(align_items)
+        for item in text_items + option_items + align_items:
             self.scene.addItem(item)
-            self.view.align_counter = max(self.view.align_counter, ad.get('question', 1) + 1)
+        self.view.text_counter = max(
+            [1] + [mark["question"] + 1 for mark in prepared_text]
+        )
+        self.view.option_counter = max(
+            [1] + [mark["question"] + 1 for mark in prepared_options]
+        )
+        self.view.align_counter = max(
+            [1] + [mark["question"] + 1 for mark in prepared_align]
+        )
     
-    def _run_recognition_internal(self):
+    def _run_recognition_internal_legacy(self):
         """Internal recognition method without UI dialogs."""
         if not self.pdf_document or (not self.view.option_marks and not self.view.text_marks):
             return
@@ -4953,10 +6097,32 @@ class OMRSoftware(QMainWindow):
                     page_result["options"][mark.question_num] = result_opt
             self.results[p_idx] = page_result
 
+    def _run_recognition_internal(self):
+        """Batch recognition using the same implementation as the GUI."""
+
+        if not self.pdf_document or (
+            not self.view.option_marks and not self.view.text_marks
+        ):
+            return
+        manual_answer_key = (
+            dict(self.answer_key) if not self.first_page_key else {}
+        )
+        self.results = {}
+        self.answer_key = manual_answer_key
+        self.debug_records = []
+        self._reset_align_templates()
+        for page_idx in range(len(self.pdf_document)):
+            QtWidgets.QApplication.processEvents()
+            self.results[page_idx] = self._recognize_page(
+                page_idx, preserve_overrides=False
+            )
+            if self.first_page_key and page_idx == 0:
+                self.answer_key = self._answer_key_from_result(self.results[0])
+
     def _export_excel_internal(self, output_path):
         """Internal method to export Excel without file dialog."""
-        if not hasattr(self, 'results'):
-            return
+        if not self.results:
+            raise ValueError("No recognition results are available for export.")
 
         include_summary = self.check_include_summary.isChecked() if hasattr(self, "check_include_summary") else True
         include_topics = self.check_include_topics.isChecked() if hasattr(self, "check_include_topics") else True
@@ -5011,6 +6177,9 @@ class OMRSoftware(QMainWindow):
         page_totals = []
         page_blank_counts = []
         page_multi_counts = []
+        question_correct = {question: 0 for question in sorted_qs}
+        question_denominators = {question: 0 for question in sorted_qs}
+        included_page_indices = set()
         
         student_order = getattr(self, 'student_order', [])
 
@@ -5057,19 +6226,26 @@ class OMRSoftware(QMainWindow):
                         correct_val = self.answer_key.get(q, "")
                         if correct_val != "":
                             page_total += 1
+                            question_denominators[q] += 1
                             if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
                                 page_score += 1
+                                question_correct[q] += 1
 
                 if sorted_qs and not is_absent and p_idx is not None:
                     first_q_col = get_column_letter(q_start_col)
                     last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
-                    score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
+                    score_formula = (
+                        f'=SUMPRODUCT(--({first_q_col}$2:{last_q_col}$2<>""),'
+                        f'--({first_q_col}{data_row_num}:{last_q_col}{data_row_num}'
+                        f'={first_q_col}$2:{last_q_col}$2))'
+                    )
                     row.append(score_formula)
                 else:
                     row.append("")
 
                 ws.append(row)
                 if not is_absent and p_idx is not None:
+                    included_page_indices.add(p_idx)
                     page_scores.append(page_score)
                     page_totals.append(page_total)
                     page_blank_counts.append(page_blank)
@@ -5108,19 +6284,26 @@ class OMRSoftware(QMainWindow):
                         correct_val = self.answer_key.get(q, "")
                         if correct_val != "":
                             page_total += 1
+                            question_denominators[q] += 1
                             if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
                                 page_score += 1
+                                question_correct[q] += 1
 
                 if sorted_qs and not is_absent:
                     first_q_col = get_column_letter(q_start_col)
                     last_q_col = get_column_letter(q_start_col + len(sorted_qs) - 1)
-                    score_formula = f'=SUMPRODUCT(({first_q_col}{data_row_num}:{last_q_col}{data_row_num}={first_q_col}$2:{last_q_col}$2)*1)'
+                    score_formula = (
+                        f'=SUMPRODUCT(--({first_q_col}$2:{last_q_col}$2<>""),'
+                        f'--({first_q_col}{data_row_num}:{last_q_col}{data_row_num}'
+                        f'={first_q_col}$2:{last_q_col}$2))'
+                    )
                     row.append(score_formula)
                 else:
                     row.append("")
 
                 ws.append(row)
                 if not is_absent:
+                    included_page_indices.add(p_idx)
                     page_scores.append(page_score)
                     page_totals.append(page_total)
                     page_blank_counts.append(page_blank)
@@ -5154,11 +6337,13 @@ class OMRSoftware(QMainWindow):
             
             for q_idx, q in enumerate(sorted_qs):
                 col_num = q_start_col + q_idx
-                col_letter = get_column_letter(col_num)
-                data_range = f"{col_letter}{first_data_row}:{col_letter}{last_data_row}"
-                key_cell = f"{col_letter}$2"
-                percent_formula = f'=IF(COUNTA({data_range})>0, COUNTIF({data_range},{key_cell})/COUNTA({data_range})*100, 0)'
-                cell = ws.cell(row=stats_row_num, column=col_num, value=percent_formula)
+                denominator = question_denominators.get(q, 0)
+                value = (
+                    question_correct.get(q, 0) / denominator * 100.0
+                    if denominator
+                    else None
+                )
+                cell = ws.cell(row=stats_row_num, column=col_num, value=value)
                 cell.fill = green_fill
                 cell.alignment = center_align
                 cell.number_format = '0.0"%"'
@@ -5220,23 +6405,26 @@ class OMRSoftware(QMainWindow):
             for col in range(1, 5):
                 analysis.cell(row=1, column=col).font = header_font
 
-            pages_count = len(page_scores)
+            pages_count = len(included_page_indices)
             for topic, qs in topic_groups.items():
-                total_items = max(1, len(qs) * max(1, pages_count))
+                scored_qs = [
+                    q for q in qs if str(self.answer_key.get(q, "")).strip()
+                ]
+                total_items = len(scored_qs) * pages_count
                 correct_count = 0
                 for p_idx, res in self.results.items():
-                    if self.first_page_key and p_idx == 0:
+                    if p_idx not in included_page_indices:
                         continue
                     opts = res.get("options", {})
-                    for q in qs:
+                    for q in scored_qs:
                         correct_val = self.answer_key.get(q, "")
-                        if correct_val == "":
-                            continue
                         val = opts.get(q, "")
                         if "".join(str(val).split()).lower() == "".join(str(correct_val).split()).lower():
                             correct_count += 1
                 avg_score_topic = correct_count / max(1, pages_count)
-                avg_pct = correct_count / total_items * 100
+                avg_pct = (
+                    correct_count / total_items * 100 if total_items else 0
+                )
                 analysis.append([topic, ", ".join([f"Q{q}" for q in qs]), avg_score_topic, avg_pct])
             
         wb.save(output_path)
@@ -5274,18 +6462,7 @@ class OMRSoftware(QMainWindow):
             if is_absent:
                 continue
             
-            page = self.pdf_document[page_idx]
-            mat = fitz.Matrix(2, 2)
-            pix = page.get_pixmap(matrix=mat)
-
-            img_pil = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            img_np = np.array(img_pil)
-
-            if self.check_auto_deskew.isChecked():
-                img_np, skew_angle = deskew_image(img_np)
-
-            if self.check_auto_align.isChecked():
-                img_np, (dx, dy), response = self.align_image(img_np, page_idx)
+            img_np, _ = self._prepare_page_for_recognition(page_idx)
 
             h, w = img_np.shape[:2]
             qimg = QImage(img_np.data, w, h, img_np.strides[0], QImage.Format_RGB888).copy()

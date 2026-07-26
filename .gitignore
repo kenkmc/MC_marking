@@ -20,6 +20,7 @@ debug_crops/
 
 # Virtual environment
 .venv/
+.build-venv/
 
 # Local environment/config
 .env
