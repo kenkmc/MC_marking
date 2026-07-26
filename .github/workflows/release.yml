@@ -111,7 +111,11 @@ jobs:
             Stop-Process -Id $process.Id -Force
             throw "CheckMate smoke test timed out."
           }
+          $process.WaitForExit()
           $process.Refresh()
+          if ($null -eq $process.ExitCode) {
+            throw "CheckMate smoke test did not return an exit code."
+          }
           if ($process.ExitCode -ne 0) {
             throw "CheckMate smoke test failed with exit code $($process.ExitCode)."
           }
@@ -145,9 +149,15 @@ jobs:
           $version = '${{ steps.release.outputs.version }}'
           $installer = Resolve-Path ".\dist\CheckMate_Setup_v$version.exe"
           $installDir = Join-Path $env:RUNNER_TEMP "CheckMateSmoke"
-          & $installer /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- "/DIR=$installDir"
-          if ($LASTEXITCODE -ne 0) {
-            throw "Installer failed with exit code $LASTEXITCODE."
+          $installProcess = Start-Process -FilePath $installer -ArgumentList @(
+            '/VERYSILENT',
+            '/SUPPRESSMSGBOXES',
+            '/NORESTART',
+            '/SP-',
+            "/DIR=$installDir"
+          ) -Wait -PassThru
+          if ($null -eq $installProcess.ExitCode -or $installProcess.ExitCode -ne 0) {
+            throw "Installer failed with exit code $($installProcess.ExitCode)."
           }
 
           $appExe = Join-Path $installDir "CheckMate.exe"
@@ -159,16 +169,24 @@ jobs:
             Stop-Process -Id $process.Id -Force
             throw "Installed application smoke test timed out."
           }
+          $process.WaitForExit()
           $process.Refresh()
+          if ($null -eq $process.ExitCode) {
+            throw "Installed application smoke test did not return an exit code."
+          }
           if ($process.ExitCode -ne 0) {
             throw "Installed application smoke test failed with exit code $($process.ExitCode)."
           }
 
           $uninstaller = Join-Path $installDir "unins000.exe"
           if (Test-Path -LiteralPath $uninstaller) {
-            & $uninstaller /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-            if ($LASTEXITCODE -ne 0) {
-              throw "Uninstaller failed with exit code $LASTEXITCODE."
+            $uninstallProcess = Start-Process -FilePath $uninstaller -ArgumentList @(
+              '/VERYSILENT',
+              '/SUPPRESSMSGBOXES',
+              '/NORESTART'
+            ) -Wait -PassThru
+            if ($null -eq $uninstallProcess.ExitCode -or $uninstallProcess.ExitCode -ne 0) {
+              throw "Uninstaller failed with exit code $($uninstallProcess.ExitCode)."
             }
           }
 
