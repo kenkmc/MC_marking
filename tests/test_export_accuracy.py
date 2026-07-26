@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -116,6 +117,28 @@ class ExcelAccuracyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.window._load_template_data(invalid)
         self.assertEqual(self.window.view.option_marks, [original])
+
+        with self.assertRaisesRegex(ValueError, "no option or text regions"):
+            self.window._load_template_data(
+                {
+                    "schema_version": 2,
+                    "text_marks": [],
+                    "option_marks": [],
+                    "align_marks": [],
+                }
+            )
+        self.assertEqual(self.window.view.option_marks, [original])
+
+    def test_empty_template_cannot_be_exported(self):
+        self.window.clear_all_marks()
+        with (
+            patch("omr_software.QMessageBox.warning") as warning,
+            patch("omr_software.QFileDialog.getSaveFileName") as save_dialog,
+        ):
+            self.window.export_template()
+
+        warning.assert_called_once()
+        save_dialog.assert_not_called()
 
     def test_pdf_render_crop_and_omr_pipeline(self):
         page_image = np.full((300, 600, 3), 248, dtype=np.uint8)

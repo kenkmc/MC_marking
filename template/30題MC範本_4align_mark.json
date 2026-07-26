@@ -343,5 +343,12 @@
       "width": 150.0,
       "height": 82.0
     }
-  ]
+  ],
+  "schema_version": 2,
+  "app_version": "1.7.1",
+  "render_scale": 2.0,
+  "reference_page": {
+    "width": 1190.4000244140625,
+    "height": 1683.3599853515625
+  }
 }

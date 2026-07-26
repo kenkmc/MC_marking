@@ -16,10 +16,11 @@ CheckMate 是適用於 Windows 的 OMR 選擇題閱卷工具。它可從掃描 P
 
 目前發佈檔未經商業程式碼簽署，因此 Windows SmartScreen 可能顯示提示。
 
-## v1.7 主要功能
+## v1.7.1 主要功能
 
 - 改良 OMR：支援深色／淺色鉛筆、藍筆、空白及多選答案，不會為模糊結果
-  強行猜測。
+  強行猜測；v1.7.1 亦會自動定位方形答案框的可填寫內部，排除外框周圍的
+  彩色掃描邊緣。
 - 自動校正：固定畫布的歪斜修正，以及可抵抗錯誤定位點的多點旋轉、縮放
   與位移對齊。
 - 快速覆核：顯示信心度與異常原因，標記空白、多選、無效或低信心度答案；
@@ -57,6 +58,8 @@ CheckMate 是適用於 Windows 的 OMR 選擇題閱卷工具。它可從掃描 P
 - 對淺色、擦改、多選或低信心度項目進行人工覆核。
 - 舊版 JSON 範本仍可使用；在 v1.7 重新儲存後會加入頁面尺寸資料，
   方便自動縮放座標。
+- 若程式提示範本沒有選項或文字區域，該 JSON 是空範本，不能用於辨識；
+  請改用 `_internal\template` 內的有效範本，或重新框選後儲存。
 
 ## 從原始碼執行
 
@@ -106,10 +109,10 @@ CheckMate is a Windows OMR marking application that reads answers from scanned P
 highlights uncertain results for review, captures student information, and exports
 scores plus question/topic analysis to Excel.
 
-Version 1.7 improves faint-pencil and blue-ink detection, preserves template
-coordinates while deskewing, adds robust multi-anchor alignment, confidence-based
-review, in-app crop previews, drag-and-drop, shortcuts, scalable templates, and a
-faster no-diagnostics-by-default recognition path.
+Version 1.7.1 rejects chromatic scanner fringes around hollow answer boxes and blocks
+empty recognition templates. It retains the faint-pencil and blue-ink detection,
+multi-anchor alignment, confidence-based review, scalable templates, and faster
+no-diagnostics-by-default path introduced in 1.7.
 
 See [CHANGELOG.md](CHANGELOG.md) for details.
 

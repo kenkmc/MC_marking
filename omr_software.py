@@ -65,7 +65,7 @@ MARK_TYPE_OPTION = "option"  # Answer option (e.g., A, B, C, D)
 MARK_TYPE_ALIGN = "align"    # Alignment reference region
 
 # Version
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 # GitHub repo for update checks
 GITHUB_REPO = "kenkmc/MC_marking"
@@ -239,6 +239,7 @@ _TRANSLATIONS = {
         # Messages
         "msg_no_pdf": "Please import a PDF first.",
         "msg_no_marks": "No marks defined. Please mark regions first.",
+        "msg_empty_template": "This template has no option or text regions and cannot be used for recognition. Use a bundled template or mark regions first.",
         "msg_no_results": "No results to export",
         "msg_recognition_complete": "Processed {pages} pages.\nRecognized {options} option fields.",
         "msg_recognition_title": "Recognition Complete",
@@ -373,6 +374,7 @@ _TRANSLATIONS = {
         # Messages
         "msg_no_pdf": "請先匯入 PDF。",
         "msg_no_marks": "未定義標記。請先標記區域。",
+        "msg_empty_template": "此範本沒有選項或文字區域，不能用於辨識。請使用內附範本，或先框選辨識區域。",
         "msg_no_results": "沒有可匯出的結果",
         "msg_recognition_complete": "已處理 {pages} 頁。\n已辨識 {options} 個選項欄。",
         "msg_recognition_title": "辨識完成",
@@ -4045,6 +4047,10 @@ class OMRSoftware(QMainWindow):
         self._reset_align_templates()
 
     def export_template(self):
+        if not self.view.option_marks and not self.view.text_marks:
+            QMessageBox.warning(self, "Template Error", tr("msg_empty_template"))
+            return
+
         data = self.view.get_all_marks_data()
         data["schema_version"] = 2
         data["app_version"] = APP_VERSION
@@ -4139,7 +4145,12 @@ class OMRSoftware(QMainWindow):
             self._review_cursor = None
             self._clear_result_table()
             self.statusBar().showMessage(
-                f"Template loaded: {os.path.basename(fname)}", 6000
+                "Template loaded: "
+                f"{os.path.basename(fname)} "
+                f"({len(self.view.option_marks)} option, "
+                f"{len(self.view.text_marks)} text, "
+                f"{len(self.view.align_marks)} alignment regions)",
+                6000,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Template Error", str(exc))
@@ -5957,8 +5968,13 @@ class OMRSoftware(QMainWindow):
                 raise ValueError(f"Template field '{key}' must be a list.")
             return value
 
-        prepared_text = [scaled_mark(raw) for raw in mark_list("text_marks")]
-        prepared_options = [scaled_mark(raw) for raw in mark_list("option_marks")]
+        raw_text_marks = mark_list("text_marks")
+        raw_option_marks = mark_list("option_marks")
+        if not raw_text_marks and not raw_option_marks:
+            raise ValueError(tr("msg_empty_template"))
+
+        prepared_text = [scaled_mark(raw) for raw in raw_text_marks]
+        prepared_options = [scaled_mark(raw) for raw in raw_option_marks]
         for mark in prepared_options:
             mark["options_count"] = int(mark.get("options_count", 4))
             if not 2 <= mark["options_count"] <= 26:

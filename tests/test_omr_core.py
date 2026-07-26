@@ -91,6 +91,54 @@ def make_degraded_answer_region(
     return image
 
 
+def make_chromatic_fringe_rectangle_region(
+    *,
+    marked=(),
+    mark_color=(70, 125, 205),
+):
+    """Model the tiny hollow boxes and scanner colour fringes in real forms."""
+
+    height, width = 24, 122
+    image = np.full((height, width, 3), 246, dtype=np.uint8)
+    edges = [round(width * index / 4) for index in range(5)]
+    for index in range(4):
+        center_x = (edges[index] + edges[index + 1] - 1) // 2
+        cv2.rectangle(
+            image,
+            (center_x - 10, 8),
+            (center_x + 10, 15),
+            (135, 135, 135),
+            1,
+        )
+        # A yellow-green two-pixel print fringe previously triggered B and C
+        # even though the rectangle interiors were completely white.
+        cv2.line(
+            image,
+            (center_x - 9, 8),
+            (center_x + 9, 8),
+            (220, 245, 105),
+            2,
+        )
+        if index in marked:
+            cv2.line(
+                image,
+                (center_x - 6, 12),
+                (center_x - 2, 15),
+                mark_color,
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.line(
+                image,
+                (center_x - 2, 15),
+                (center_x + 7, 7),
+                mark_color,
+                1,
+                cv2.LINE_AA,
+            )
+    return image
+
+
 def score(option, combined, darkness, mark, *, center=None, interior=0.03):
     center_value = darkness if center is None else center
     return {
@@ -110,6 +158,9 @@ class OMRDetectionTests(unittest.TestCase):
         result = detect_filled_options(make_answer_region())
         self.assertEqual(result.answer, "")
         self.assertTrue(result.needs_review)
+        self.assertTrue(
+            all(score["target_source"] == "crop_center" for score in result.cell_scores)
+        )
 
     def test_single_dark_mark(self):
         result = detect_filled_options(make_answer_region((1,)))
@@ -203,6 +254,50 @@ class OMRDetectionTests(unittest.TestCase):
 
         result = detect_filled_options(image)
         self.assertEqual(result.answer, "")
+
+    def test_chromatic_scanner_fringe_on_blank_rectangles_stays_blank(self):
+        result = detect_filled_options(make_chromatic_fringe_rectangle_region())
+        self.assertEqual(result.answer, "")
+        self.assertIn(result.reason, {"blank", "ambiguous"})
+        self.assertTrue(
+            all(
+                score["target_source"] == "repeated_rectangle"
+                for score in result.cell_scores
+            )
+        )
+
+    def test_thin_blue_check_survives_chromatic_fringe_filter(self):
+        result = detect_filled_options(
+            make_chromatic_fringe_rectangle_region(marked=(2,))
+        )
+        self.assertEqual(result.answer, "C")
+
+    def test_thin_pencil_check_survives_rectangle_outline_filter(self):
+        result = detect_filled_options(
+            make_chromatic_fringe_rectangle_region(
+                marked=(1,),
+                mark_color=(155, 155, 155),
+            )
+        )
+        self.assertEqual(result.answer, "B")
+
+    def test_rectangle_consensus_fills_one_missing_contour(self):
+        image = make_chromatic_fringe_rectangle_region(
+            marked=(1,),
+            mark_color=(155, 155, 155),
+        )
+        edges = [round(image.shape[1] * index / 4) for index in range(5)]
+        center_d = (edges[3] + edges[4] - 1) // 2
+        cv2.rectangle(image, (center_d - 11, 6), (center_d + 11, 17), (246, 246, 246), -1)
+
+        result = detect_filled_options(image)
+        self.assertEqual(result.answer, "B")
+        self.assertTrue(
+            all(
+                score["target_source"] == "repeated_rectangle"
+                for score in result.cell_scores
+            )
+        )
 
     def test_faint_mark_survives_scan_gradient_and_noise(self):
         for seed in range(8):

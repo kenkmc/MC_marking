@@ -1,6 +1,6 @@
 #define AppName "CheckMate"
 #ifndef AppVersion
-  #define AppVersion "1.7.0"
+  #define AppVersion "1.7.1"
 #endif
 #ifndef OutputBaseFilename
   #define OutputBaseFilename "CheckMate_Setup_v" + AppVersion

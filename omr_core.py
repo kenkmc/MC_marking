@@ -104,6 +104,162 @@ def _safe_inner(array: np.ndarray, x_ratio: float, y_ratio: float) -> np.ndarray
     return inner if inner.size else array
 
 
+def _estimate_repeated_rectangle_geometry(
+    gray: np.ndarray,
+    cell_edges: Sequence[int],
+) -> tuple[tuple[float, float, float, float], ...] | None:
+    """Locate a repeated row of hollow rectangular response boxes.
+
+    Some legacy templates tightly cover the four response rectangles but leave
+    them close to the crop's top edge.  Measuring the geometric crop centre in
+    those templates samples paper below the boxes and lets chromatic print
+    fringes dominate.  A response rectangle is wider than it is tall and is
+    repeated at the same relative position in every option cell, so a median
+    consensus can relocate the masks without following one student's mark.
+
+    Returns one local ``(center_x, center_y, width, height)`` tuple per cell.
+    Circular bubbles and rows without a strong three-cell consensus
+    intentionally fall back to the historical crop-centred geometry.
+    """
+
+    height = int(gray.shape[0])
+    candidates: list[tuple[int, float, float, float, float]] = []
+    cell_widths: list[int] = []
+    for cell_index, (left, right) in enumerate(zip(cell_edges, cell_edges[1:])):
+        cell = gray[:, left:right]
+        cell_width = int(cell.shape[1])
+        cell_widths.append(cell_width)
+        if cell_width < 8 or height < 6:
+            continue
+
+        paper = float(np.percentile(cell, 82))
+        # A slightly wider threshold retains the complete antialiased outer
+        # box instead of returning a smaller, shifted fragment.  The repeated
+        # four-cell consensus rejects paper texture and handwriting.
+        component_mask = (cell.astype(np.float32) <= paper - 18.0).astype(np.uint8)
+        contours, _ = cv2.findContours(
+            component_mask,
+            cv2.RETR_LIST,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        located: list[tuple[float, int, int, int, int]] = []
+        for contour in contours:
+            x, y, width, component_height = cv2.boundingRect(contour)
+            aspect = width / max(1.0, float(component_height))
+            if (
+                aspect <= 1.4
+                or width < max(9, int(round(cell_width * 0.30)))
+                or width > cell_width
+                or component_height < 4
+                or component_height > max(12, int(round(height * 0.75)))
+            ):
+                continue
+            contour_area = float(cv2.contourArea(contour))
+            score = (
+                width * 4.0
+                + contour_area * 0.08
+                - max(0.0, y - height * 0.45) * 3.0
+            )
+            located.append((score, x, y, width, component_height))
+
+        if not located:
+            continue
+        _, x, y, width, component_height = max(
+            located,
+            key=lambda item: item[0],
+        )
+        candidates.append(
+            (
+                cell_index,
+                (x + (width - 1.0) / 2.0) / cell_width,
+                y + (component_height - 1.0) / 2.0,
+                width / cell_width,
+                float(component_height),
+            )
+        )
+
+    # Requiring three agreeing cells prevents one or two handwritten strokes
+    # from redefining fixed option geometry.
+    if len(candidates) < 3:
+        return None
+
+    median = tuple(
+        float(np.median([row[index] for row in candidates]))
+        for index in range(1, 5)
+    )
+    inliers = [
+        row
+        for row in candidates
+        if abs(row[1] - median[0]) <= 0.18
+        and abs(row[2] - median[1]) <= max(2.5, height * 0.14)
+        and abs(row[3] - median[2]) <= 0.24
+        and abs(row[4] - median[3]) <= max(2.5, height * 0.14)
+    ]
+    if len(inliers) < 3:
+        return None
+    median = tuple(
+        float(np.median([row[index] for row in inliers]))
+        for index in range(1, 5)
+    )
+    by_cell = {int(row[0]): row[1:] for row in inliers}
+    global_centers = [
+        (
+            int(row[0]),
+            cell_edges[int(row[0])]
+            + float(row[1]) * cell_widths[int(row[0])],
+        )
+        for row in inliers
+    ]
+    spacing_candidates = [
+        (right_center - left_center) / (right_index - left_index)
+        for left_position, (left_index, left_center) in enumerate(global_centers)
+        for right_index, right_center in global_centers[left_position + 1 :]
+        if right_index != left_index
+    ]
+    fitted_spacing = float(np.median(spacing_candidates))
+    fitted_origin = float(
+        np.median(
+            [
+                center - cell_index * fitted_spacing
+                for cell_index, center in global_centers
+            ]
+        )
+    )
+    median_width = float(
+        np.median(
+            [
+                float(row[3]) * cell_widths[int(row[0])]
+                for row in inliers
+            ]
+        )
+    )
+    geometry = []
+    for cell_index, cell_width in enumerate(cell_widths):
+        located = by_cell.get(cell_index)
+        if located is None:
+            center_x = (
+                fitted_origin
+                + cell_index * fitted_spacing
+                - cell_edges[cell_index]
+            )
+            center_y = median[1]
+            target_width = median_width
+            component_height = median[3]
+        else:
+            relative_x, center_y, relative_width, component_height = located
+            center_x = relative_x * cell_width
+            target_width = relative_width * cell_width
+        geometry.append(
+            (
+                _clamp(center_x, 0.0, cell_width - 1.0),
+                _clamp(center_y, 0.0, height - 1.0),
+                max(4.0, target_width),
+                max(3.0, component_height),
+            )
+        )
+    return tuple(geometry)
+
+
 def _mean(values: Sequence[float]) -> float:
     return float(sum(values) / max(1, len(values)))
 
@@ -138,6 +294,8 @@ def _select_interior_scores(
         "core_thick_ratio",
         "core_color_signal",
         "core_color_ratio",
+        "nucleus_color_signal",
+        "nucleus_color_ratio",
         "nucleus_local_signal",
         "nucleus_peak_signal",
     )
@@ -162,6 +320,19 @@ def _select_interior_scores(
         "min_color_ratio": 0.035,
         "min_nucleus_local_signal": 12.0,
         "min_nucleus_peak_signal": 20.0,
+        "rectangle_color_core_ratio": 0.20,
+        "rectangle_color_nucleus_ratio": 0.18,
+        "rectangle_color_signal": 15.0,
+        "rectangle_color_dark_signal": 18.0,
+        "rectangle_dark_core_signal": 22.0,
+        "rectangle_dark_nucleus_signal": 20.0,
+        "rectangle_dark_peak_signal": 25.0,
+        "rectangle_dark_core_ratio": 0.30,
+        "rectangle_dark_nucleus_ratio": 0.25,
+        "rectangle_relative_evidence_margin": 10.0,
+        "rectangle_relative_core_margin": 7.0,
+        "rectangle_relative_nucleus_margin": 6.0,
+        "rectangle_relative_peak_margin": 10.0,
     }
 
     candidates: list[dict[str, Any]] = []
@@ -178,6 +349,63 @@ def _select_interior_scores(
         nucleus_color_ratio = float(score.get("nucleus_color_ratio", 0.0))
         nucleus_local_signal = float(score.get("nucleus_local_signal", 0.0))
         nucleus_peak_signal = float(score.get("nucleus_peak_signal", 0.0))
+
+        if score.get("target_source") == "repeated_rectangle":
+            rectangle_color_mark = (
+                color_ratio >= thresholds["rectangle_color_core_ratio"]
+                and nucleus_color_ratio
+                >= thresholds["rectangle_color_nucleus_ratio"]
+                and color_signal >= thresholds["rectangle_color_signal"]
+                and core_signal >= thresholds["rectangle_color_dark_signal"]
+                and nucleus_signal
+                >= thresholds["rectangle_color_dark_signal"]
+            )
+            rectangle_dark_mark = (
+                core_signal >= thresholds["rectangle_dark_core_signal"]
+                and nucleus_signal
+                >= thresholds["rectangle_dark_nucleus_signal"]
+                and nucleus_peak_signal
+                >= thresholds["rectangle_dark_peak_signal"]
+                and core_ratio >= thresholds["rectangle_dark_core_ratio"]
+                and nucleus_ratio
+                >= thresholds["rectangle_dark_nucleus_ratio"]
+            )
+            rectangle_relative_mark = (
+                float(score.get("interior_evidence_margin", 0.0))
+                >= thresholds["rectangle_relative_evidence_margin"]
+                and float(score.get("core_dark_signal_margin", 0.0))
+                >= thresholds["rectangle_relative_core_margin"]
+                and float(score.get("nucleus_dark_signal_margin", 0.0))
+                >= thresholds["rectangle_relative_nucleus_margin"]
+                and float(score.get("nucleus_peak_signal_margin", 0.0))
+                >= thresholds["rectangle_relative_peak_margin"]
+                and core_signal >= 12.0
+                and core_ratio >= 0.25
+                and nucleus_ratio >= 0.15
+            )
+            score["strength"] = float(
+                evidence / max(thresholds["min_evidence"], 1e-6)
+                + core_signal
+                / max(thresholds["rectangle_dark_core_signal"], 1e-6)
+                + nucleus_signal
+                / max(thresholds["rectangle_dark_nucleus_signal"], 1e-6)
+            ) / 3.0
+            score["gate"] = (
+                "rectangle_color"
+                if rectangle_color_mark
+                else "rectangle_dark"
+                if rectangle_dark_mark
+                else "rectangle_relative"
+                if rectangle_relative_mark
+                else "none"
+            )
+            if (
+                rectangle_color_mark
+                or rectangle_dark_mark
+                or rectangle_relative_mark
+            ):
+                candidates.append(score)
+            continue
 
         # Independent gates recognise all-filled rows and guarantee monotonic
         # multi-select behaviour.  Requiring nucleus evidence is what rejects
@@ -586,6 +814,10 @@ def detect_filled_options(image: Any, options_count: int = 4) -> OMRDetectionRes
     ]
     cell_edges[0] = content_left
     cell_edges[-1] = content_right
+    rectangle_geometries = _estimate_repeated_rectangle_geometry(
+        gray_u8,
+        cell_edges,
+    )
 
     enhanced = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.float32)
     overall_mean = float(np.mean(_safe_inner(gray, 0.02, 0.10)))
@@ -616,35 +848,103 @@ def detect_filled_options(image: Any, options_count: int = 4) -> OMRDetectionRes
 
         cell_height, cell_width = cell_gray.shape[:2]
         yy, xx = np.ogrid[:cell_height, :cell_width]
-        center_x = (cell_width - 1.0) / 2.0
-        center_y = (cell_height - 1.0) / 2.0
-        support_rx = max(2.0, min(cell_width * 0.27, cell_height * 0.36))
-        support_ry = max(2.0, min(cell_height * 0.36, cell_width * 0.27))
-        radius_squared = (
-            ((xx - center_x) / support_rx) ** 2
-            + ((yy - center_y) / support_ry) ** 2
-        )
-        core_mask = radius_squared <= 0.58**2
-        nucleus_mask = radius_squared <= 0.31**2
-        outline_ring_mask = np.logical_and(
-            radius_squared >= 0.70**2,
-            radius_squared <= 1.12**2,
-        )
+        if rectangle_geometries is not None:
+            center_x, center_y, target_width, target_height = (
+                rectangle_geometries[index]
+            )
+            support_rx = max(2.0, target_width * 0.50)
+            support_ry = max(2.0, target_height * 0.50)
+            target_source = "repeated_rectangle"
+
+            # Replace the bubble ellipses with the measured writable interior.
+            # Float boundaries follow OpenCV's inclusive bounding rectangle
+            # convention and keep a strict two-pixel distance from print.
+            target_left = center_x - (target_width - 1.0) * 0.50
+            target_right = center_x + (target_width - 1.0) * 0.50
+            target_top = center_y - (target_height - 1.0) * 0.50
+            target_bottom = center_y + (target_height - 1.0) * 0.50
+            target_box_mask = (
+                (xx >= target_left - 0.5)
+                & (xx <= target_right + 0.5)
+                & (yy >= target_top - 0.5)
+                & (yy <= target_bottom + 0.5)
+            )
+            core_mask = (
+                (xx >= target_left + 2.0)
+                & (xx <= target_right - 2.0)
+                & (yy >= target_top + 2.0)
+                & (yy <= target_bottom - 2.0)
+            )
+            if not np.any(core_mask):
+                core_mask = (
+                    (xx >= target_left + 1.0)
+                    & (xx <= target_right - 1.0)
+                    & (yy >= target_top + 1.0)
+                    & (yy <= target_bottom - 1.0)
+                )
+            nucleus_mask = (
+                core_mask
+                & (xx >= center_x - target_width * 0.27)
+                & (xx <= center_x + target_width * 0.27)
+            )
+            outline_ring_mask = target_box_mask & np.logical_not(core_mask)
+            outer_paper_mask = (
+                (xx >= target_left - 4.0)
+                & (xx <= target_right + 4.0)
+                & (yy >= target_top - 4.0)
+                & (yy <= target_bottom + 4.0)
+                & np.logical_not(target_box_mask)
+            )
+            if not np.any(outer_paper_mask):
+                outer_paper_mask = np.logical_not(core_mask)
+        else:
+            center_x = (cell_width - 1.0) / 2.0
+            center_y = (cell_height - 1.0) / 2.0
+            support_rx = max(2.0, min(cell_width * 0.27, cell_height * 0.36))
+            support_ry = max(2.0, min(cell_height * 0.36, cell_width * 0.27))
+            target_width = support_rx * 2.0
+            target_height = support_ry * 2.0
+            target_source = "crop_center"
+            radius_squared = (
+                ((xx - center_x) / support_rx) ** 2
+                + ((yy - center_y) / support_ry) ** 2
+            )
+            core_mask = radius_squared <= 0.58**2
+            nucleus_mask = radius_squared <= 0.31**2
+            outline_ring_mask = np.logical_and(
+                radius_squared >= 0.70**2,
+                radius_squared <= 1.12**2,
+            )
+            outer_paper_mask = np.logical_and(
+                radius_squared >= 1.34**2,
+                radius_squared <= 1.85**2,
+            )
+            if not np.any(outer_paper_mask):
+                outer_paper_mask = radius_squared >= 1.24**2
 
         # Estimate paper from a symmetric ring outside the printed bubble.
         # This is both much faster than per-cell inpainting and insensitive to
         # a linear scanner gradient: opposite sides balance at the centre.
         # It remains valid when every option is filled because the surrounding
         # paper in each individual cell is still unmarked.
-        cell_clean_gray = clean_gray[:, left:right]
-        outer_paper_mask = np.logical_and(
-            radius_squared >= 1.34**2,
-            radius_squared <= 1.85**2,
-        )
-        if not np.any(outer_paper_mask):
-            outer_paper_mask = radius_squared >= 1.24**2
-        outer_values = cell_clean_gray[outer_paper_mask]
-        local_paper_level = float(np.percentile(outer_values, 65))
+        if target_source == "repeated_rectangle":
+            # Preserve one-pixel pencil/blue strokes.  The strict rectangle
+            # erosion supplies the print/noise guard that median blur provides
+            # for crop-centred bubbles.
+            cell_clean_gray = gray_u8[:, left:right]
+            outer_values = cell_clean_gray[outer_paper_mask]
+            local_paper_level = float(np.percentile(outer_values, 70))
+            saturation_floor = float(np.median(cell_saturation[outer_paper_mask]))
+            cell_color_response = np.maximum(
+                cell_saturation - saturation_floor,
+                0.0,
+            )
+            thick_distance_threshold = 1.35
+        else:
+            cell_clean_gray = clean_gray[:, left:right]
+            outer_values = cell_clean_gray[outer_paper_mask]
+            local_paper_level = float(np.percentile(outer_values, 65))
+            thick_distance_threshold = 1.85
         cell_dark_response = np.maximum(
             local_paper_level - cell_clean_gray.astype(np.float32),
             0.0,
@@ -659,7 +959,7 @@ def detect_filled_options(image: Any, options_count: int = 4) -> OMRDetectionRes
             cv2.DIST_L2,
             3,
         )
-        thick_ink_mask = distance >= 1.85
+        thick_ink_mask = distance >= thick_distance_threshold
 
         def masked_mean(values: np.ndarray, mask: np.ndarray) -> float:
             return float(np.mean(values[mask])) if np.any(mask) else 0.0
@@ -777,6 +1077,11 @@ def detect_filled_options(image: Any, options_count: int = 4) -> OMRDetectionRes
                 "core_color_ratio": core_color_ratio,
                 "nucleus_color_ratio": nucleus_color_ratio,
                 "local_paper_level": local_paper_level,
+                "target_source": target_source,
+                "target_center_x": center_x,
+                "target_center_y": center_y,
+                "target_radius_x": support_rx,
+                "target_radius_y": support_ry,
                 "core_local_signal": core_local_signal,
                 "nucleus_local_signal": nucleus_local_signal,
                 "nucleus_peak_signal": nucleus_peak_signal,
